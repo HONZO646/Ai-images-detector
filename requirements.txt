@@ -1,0 +1,30 @@
+# Core
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+scipy>=1.10.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Frequency Analysis
+PyWavelets>=1.4.0
+
+# Semantic Features
+sentence-transformers>=2.2.0
+transformers>=4.30.0
+
+# Data Loading
+datasets>=2.14.0
+
+# Metrics & Visualization
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Training
+tqdm>=4.65.0
+tensorboard>=2.14.0
+
+# Utilities
+PyYAML>=6.0
+jsonargparse>=4.0.0
