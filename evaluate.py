@@ -69,7 +69,9 @@ class Evaluator:
             rgb = rgb.to(self.device)
             
             output = self.model(gray, rgb)
-            probabilities = output['probability'].squeeze().cpu().numpy()
+            logits = output['probability'].squeeze()
+            # Convert logits to probabilities
+            probabilities = torch.sigmoid(logits).cpu().numpy()
             
             self.predictions.extend(probabilities.flatten().tolist())
             self.targets.extend(labels.numpy().flatten().tolist())

@@ -107,7 +107,7 @@ class NPRDetector(nn.Module):
         # Uncertainty estimation (опционально)
         if self.use_uncertainty:
             mean_pred, uncertainty = self.uncertainty_estimator(self.classifier, final_embedding)
-            result['probability'] = mean_pred
+            result['probability'] = mean_pred  # These are logits; sigmoid applied in inference
             result['uncertainty'] = uncertainty
         
         return result
@@ -116,14 +116,16 @@ class NPRDetector(nn.Module):
                 threshold: float = 0.5) -> Dict[str, any]:
         """
         Инференс с постобработкой
-        Возвращает словарь с интерпретируемыми результатами
+        Model returns logits, sigmoid applied here for probability
         """
         self.eval()
         
         with torch.no_grad():
             output = self(x_gray, x_rgb)
             
-            prob_ai = output['probability'].item()
+            # Apply sigmoid to logits for probability
+            logits = output['probability']
+            prob_ai = torch.sigmoid(logits).item()
             pred_class = "AI_GENERATED" if prob_ai >= threshold else "REAL"
             confidence = abs(prob_ai - 0.5) * 2  # 0.0 - 1.0
             
@@ -186,8 +188,9 @@ class NPRDetectorWithEarlyExit(NPRDetector):
             # Сначала только быстрая spatial ветка
             spatial_emb = self.spatial_branch(x_gray)
             
-            # Простой классификатор на spatial features
-            quick_pred = self.classifier(spatial_emb).item()
+            # Простой классификатор на spatial features (returns logits)
+            quick_logits = self.classifier(spatial_emb)
+            quick_pred = torch.sigmoid(quick_logits).item()
             quick_confidence = abs(quick_pred - 0.5) * 2
             
             # Early exit если уверены
@@ -201,7 +204,7 @@ class NPRDetectorWithEarlyExit(NPRDetector):
                     'branch_used': 'spatial_only'
                 }
             
-            # Иначе полный проход
+            # Иначе полный проход (predict applies sigmoid internally)
             return {
                 **self.predict(x_gray, x_rgb),
                 'early_exit': False,
@@ -263,7 +266,7 @@ if __name__ == '__main__':
     print("\n=== NPRDetector Test ===")
     print(f"Input (gray): {x_gray.shape}")
     print(f"Input (RGB): {x_rgb.shape}")
-    print(f"Output probability: {output['probability'].shape}")
+    print(f"Output logits: {output['probability'].shape}")
     print(f"Output gate_weights: {output['gate_weights'].shape}")
     
     # Подсчёт параметров

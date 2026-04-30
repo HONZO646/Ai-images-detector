@@ -278,10 +278,11 @@ img = Image.open('test.jpg').convert('RGB')
 rgb = torch.from_numpy(np.array(img)/255.0).permute(2,0,1).unsqueeze(0)
 gray = rgb.mean(dim=1, keepdim=True)
 
-# Предсказание
+# Предсказание (модель возвращает logits, применяем sigmoid для вероятности)
 with torch.no_grad():
     output = model(gray, rgb)
-    prob_ai = output['probability'].item()
+    logits = output['probability']
+    prob_ai = torch.sigmoid(logits).item()
     print(f"P(AI) = {prob_ai:.4f}")
 ```
 

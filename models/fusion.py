@@ -133,6 +133,7 @@ class AdaptiveGating(nn.Module):
 class ClassifierHead(nn.Module):
     """
     MLP классификатор для финального предсказания
+    Возвращает logits (без sigmoid) для совместимости с BCEWithLogitsLoss
     """
     
     def __init__(self, input_dim: int = 128, hidden_dims: list = None, dropout_rate: float = 0.3):
@@ -153,18 +154,24 @@ class ClassifierHead(nn.Module):
             ])
             prev_dim = hidden_dim
         
-        # Финальный слой
+        # Финальный слой — только logits, без sigmoid
+        # Sigmoid применяется отдельно в inference
         layers.append(nn.Linear(prev_dim, 1))
-        layers.append(nn.Sigmoid())
         
         self.classifier = nn.Sequential(*layers)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: [B, input_dim]
-        Возвращает: [B, 1] probability P(AI)
+        Возвращает: [B, 1] logits (не probability!)
         """
         return self.classifier(x)
+    
+    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Инференс: возвращает probability через sigmoid
+        """
+        return torch.sigmoid(self.forward(x))
 
 
 class UncertaintyEstimator(nn.Module):

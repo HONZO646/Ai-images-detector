@@ -102,7 +102,9 @@ class NPRInference:
         with torch.no_grad():
             output = self.model(gray, rgb)
             
-            prob_ai = output['probability'].item()
+            # Model returns logits, apply sigmoid for probability
+            logits = output['probability']
+            prob_ai = torch.sigmoid(logits).item()
             pred_class = "AI_GENERATED" if prob_ai >= threshold else "REAL"
             confidence = abs(prob_ai - 0.5) * 2
             
@@ -137,8 +139,9 @@ class NPRInference:
             # Сначала только spatial branch (быстрая)
             spatial_emb = self.model.spatial_branch(gray)
             
-            # Quick prediction
-            quick_pred = self.model.classifier(spatial_emb).item()
+            # Quick prediction (classifier returns logits, apply sigmoid)
+            quick_logits = self.model.classifier(spatial_emb)
+            quick_pred = torch.sigmoid(quick_logits).item()
             quick_confidence = abs(quick_pred - 0.5) * 2
             
             # Early exit?

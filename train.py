@@ -15,6 +15,8 @@ from typing import Dict, Tuple, Optional
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+from torch.amp import GradScaler, autocast
+
 from config import Config
 from models.detector import NPRDetector, create_detector
 from data.dataset import prepare_datasets, create_dataloaders
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 class Trainer:
     """
-    Trainer класс для NPR Detector
+    Trainer класс для NPR Detector с поддержкой mixed precision
     """
     
     def __init__(self, config: Config):
@@ -45,10 +47,16 @@ class Trainer:
         self.model = create_detector(config.model, device=self.device)
         self.model = self.model.to(self.device)
         
-        # Data (streaming mode по умолчанию)
+        # Mixed precision scaler
+        self.use_amp = config.training.use_amp and self.device.type == 'cuda'
+        self.scaler = GradScaler('cuda') if self.use_amp else None
+        if self.use_amp:
+            logger.info("✅ Mixed Precision Training (AMP) enabled")
+        
+        # Data (download to disk)
         self.train_dataset, self.val_dataset, self.test_dataset = prepare_datasets(
             config,
-            streaming=config.data.streaming  # Из config (по умолчанию True)
+            streaming=config.data.streaming  # False = download to disk
         )
         self.train_loader, self.val_loader, self.test_loader = create_dataloaders(
             self.train_dataset,
@@ -59,8 +67,8 @@ class Trainer:
             pin_memory=config.training.pin_memory
         )
         
-        # Loss function
-        self.criterion = nn.BCELoss()
+        # Loss function - BCEWithLogitsLoss is AMP-safe (combines sigmoid + BCE)
+        self.criterion = nn.BCEWithLogitsLoss()
         
         # Optimizer
         self.optimizer = self._create_optimizer()
@@ -120,7 +128,7 @@ class Trainer:
             raise ValueError(f"Unknown optimizer: {self.config.training.optimizer}")
     
     def train_epoch(self) -> Dict[str, float]:
-        """Один epoch обучения"""
+        """Один epoch обучения с mixed precision"""
         self.model.train()
         
         loss_meter = AverageMeter()
@@ -136,31 +144,49 @@ class Trainer:
         
         for batch_idx, (gray, rgb, labels) in enumerate(pbar):
             # Перенос на устройство
-            gray = gray.to(self.device)
-            rgb = rgb.to(self.device)
-            labels = labels.to(self.device)
+            gray = gray.to(self.device, non_blocking=True)
+            rgb = rgb.to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
             
-            # Forward pass
-            output = self.model(gray, rgb)
-            probabilities = output['probability'].squeeze()
+            # Forward pass with autocast for mixed precision
+            with autocast(device_type='cuda', enabled=self.use_amp):
+                output = self.model(gray, rgb)
+                # Model now returns logits (not probabilities)
+                logits = output['probability'].squeeze()
+                
+                # Loss on logits (BCEWithLogitsLoss expects raw logits)
+                loss = self.criterion(logits, labels)
             
-            # Loss
-            loss = self.criterion(probabilities, labels)
-            
-            # Backward pass
+            # Backward pass with gradient scaling
             self.optimizer.zero_grad()
-            loss.backward()
             
-            # Gradient clipping
-            if self.config.training.gradient_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.config.training.gradient_clip_norm
-                )
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+                
+                # Gradient clipping
+                if self.config.training.gradient_clip_norm > 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config.training.gradient_clip_norm
+                    )
+                
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                
+                # Gradient clipping
+                if self.config.training.gradient_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config.training.gradient_clip_norm
+                    )
+                
+                self.optimizer.step()
             
-            self.optimizer.step()
-            
-            # Метрики
+            # Метрики — convert logits to probabilities for metrics
+            probabilities = torch.sigmoid(logits)
             loss_meter.update(loss.item(), gray.shape[0])
             predictions.extend(probabilities.detach().cpu().numpy())
             targets.extend(labels.detach().cpu().numpy())
@@ -185,7 +211,7 @@ class Trainer:
     
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
-        """Валидация"""
+        """Валидация с mixed precision"""
         self.model.eval()
         
         loss_meter = AverageMeter()
@@ -195,16 +221,20 @@ class Trainer:
         pbar = tqdm(self.val_loader, desc=f"Epoch {self.current_epoch} [Val]")
         
         for gray, rgb, labels in pbar:
-            gray = gray.to(self.device)
-            rgb = rgb.to(self.device)
-            labels = labels.to(self.device)
+            gray = gray.to(self.device, non_blocking=True)
+            rgb = rgb.to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
             
-            # Forward pass
-            output = self.model(gray, rgb)
-            probabilities = output['probability'].squeeze()
+            # Forward pass with autocast
+            with autocast(device_type='cuda', enabled=self.use_amp):
+                output = self.model(gray, rgb)
+                logits = output['probability'].squeeze()
+                
+                # Loss on logits
+                loss = self.criterion(logits, labels)
             
-            # Loss
-            loss = self.criterion(probabilities, labels)
+            # Convert logits to probabilities for metrics
+            probabilities = torch.sigmoid(logits)
             
             loss_meter.update(loss.item(), gray.shape[0])
             predictions.extend(probabilities.cpu().numpy())
@@ -245,7 +275,9 @@ class Trainer:
             labels = labels.to(self.device)
             
             output = self.model(gray, rgb)
-            probabilities = output['probability'].squeeze()
+            logits = output['probability'].squeeze()
+            # Convert logits to probabilities for metrics
+            probabilities = torch.sigmoid(logits)
             
             predictions.extend(probabilities.cpu().numpy())
             targets.extend(labels.cpu().numpy())

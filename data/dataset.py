@@ -464,59 +464,48 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
     return train_dataset, val_dataset, test_dataset
 
 
-def collect_imagenet_hf(max_samples: int = 15000,
+def collect_imagenet_hf(max_samples: int = 5000,
                         cache_dir: str = None,
                         split: str = 'validation',
-                        streaming: bool = True) -> List[str]:
+                        streaming: bool = False) -> List[str]:
     """
     Загрузка ImageNet-1k из HuggingFace (ILSVRC/imagenet-1k)
-    Возвращает пути к сохранённым реальным изображениям (только если streaming=False)
+    Возвращает пути к сохранённым реальным изображениям
     
     Args:
         max_samples: максимальное количество изображений
         cache_dir: директория кэша для HF datasets
         split: 'validation' или 'train'
-        streaming: если True, данные не сохраняются на диск
+        streaming: если True, данные будут стримиться и сохранены локально без полного кэша
     """
     try:
         from datasets import load_dataset
     except ImportError:
         raise ImportError("Установите datasets: pip install datasets")
     
-    logger.info(f"Загрузка ImageNet-1k из HuggingFace (split={split}, streaming={streaming})...")
+    logger.info(f"Загрузка ImageNet-1k из HuggingFace (split={split}, max_samples={max_samples})...")
     logger.info("⚠️ Требуется аутентификация!")
     logger.info("   1. Примите лицензию: https://huggingface.co/datasets/ILSVRC/imagenet-1k")
     logger.info("   2. Выполните: huggingface-cli login")
     
-    # Загрузка ImageNet-1k
+    # Используем streaming чтобы не скачивать весь датасет на диск
     ds = load_dataset(
         "ILSVRC/imagenet-1k",
         split=split,
-        cache_dir=cache_dir,
-        streaming=streaming
+        streaming=True
     )
-    
-    if streaming:
-        logger.info("✅ Streaming mode активен — данные НЕ загружаются на диск")
-        return None  # Не возвращаем пути
-    
-    # Старое поведение (сохранение на диск)
-    logger.info("⚠️ Streaming mode отключен — данные будут сохранены локально")
-    
-    # Ограничение количества
-    if hasattr(ds, '__len__') and len(ds) > max_samples:
-        indices = random.sample(range(len(ds)), max_samples)
-        ds = ds.select(indices)
-    
-    logger.info(f"Загружено {len(ds)} изображений ImageNet-1k")
     
     # Сохранение изображений локально
     output_dir = Path("data") / "real" / "imagenet"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     image_paths = []
+    count = 0
     
     for idx, item in enumerate(ds):
+        if count >= max_samples:
+            break
+            
         try:
             img = item['image']
             if img is None:
@@ -531,39 +520,52 @@ def collect_imagenet_hf(max_samples: int = 15000,
             img.save(filepath)
             
             image_paths.append(str(filepath))
+            count += 1
+            
+            if count % 1000 == 0:
+                logger.info(f"  Сохранено {count}/{max_samples} изображений ImageNet")
             
         except Exception as e:
             logger.warning(f"Ошибка обработки примера {idx}: {e}")
             continue
     
-    logger.info(f"Сохранено {len(image_paths)} реальных изображений ImageNet")
+    logger.info(f"✅ Сохранено {len(image_paths)} реальных изображений ImageNet")
     
     return image_paths
 
 
 def collect_hf_dataset(dataset_name: str,
                        split: str = 'train',
-                       cache_dir: str = None) -> List[str]:
+                       cache_dir: str = None,
+                       max_samples: int = None) -> List[str]:
     """
     Загрузка датасета из HuggingFace
     Возвращает пути к сохранённым изображениям
+    
+    Args:
+        max_samples: максимальное количество изображений (None = все)
     """
     try:
         from datasets import load_dataset
     except ImportError:
         raise ImportError("Установите datasets: pip install datasets")
 
-    logger.info(f"Загрузка HF dataset: {dataset_name}")
+    logger.info(f"Загрузка HF dataset: {dataset_name} (max_samples={max_samples})...")
 
-    ds = load_dataset(dataset_name, split=split, cache_dir=cache_dir)
-
+    # Используем streaming чтобы не скачивать весь датасет на диск
+    ds = load_dataset(dataset_name, split=split, streaming=False)
+    
     # Сохранение изображений локально
     output_dir = Path("data") / "ai_generated"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     image_paths = []
+    count = 0
 
     for idx, item in enumerate(ds):
+        if max_samples is not None and count >= max_samples:
+            break
+            
         try:
             # Предполагаем что изображение в поле 'image'
             img = item['image']
@@ -580,12 +582,16 @@ def collect_hf_dataset(dataset_name: str,
             img.save(filepath)
 
             image_paths.append(str(filepath))
+            count += 1
+            
+            if max_samples is not None and count % 1000 == 0:
+                logger.info(f"  Сохранено {count}/{max_samples} AI изображений")
 
         except Exception as e:
             logger.warning(f"Ошибка обработки примера {idx}: {e}")
             continue
 
-    logger.info(f"Сохранено {len(image_paths)} AI изображений")
+    logger.info(f"✅ Сохранено {len(image_paths)} AI изображений")
 
     return image_paths
 
@@ -608,18 +614,42 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     # Старое поведение (сохранение на диск)
     logger.info("📁 Используем локальное сохранение данных")
     
-    # Загрузка реальных изображений из ImageNet-1k (HuggingFace)
-    real_paths = collect_imagenet_hf(
-        max_samples=config.data.hf_imagenet_max_samples,
-        split=config.data.hf_imagenet_split,
-        streaming=False
-    )
+    # Проверяем наличие уже скачанных данных
+    real_dir = Path("data") / "real" / "imagenet"
+    ai_dir = Path("data") / "ai_generated"
+    
+    if real_dir.exists() and ai_dir.exists():
+        real_existing = list(real_dir.glob("*.png"))
+        ai_existing = list(ai_dir.glob("*.png"))
+        
+        if len(real_existing) > 0 and len(ai_existing) > 0:
+            logger.info("✅ Найдены существующие данные на диске:")
+            logger.info(f"   Real: {len(real_existing)} изображений")
+            logger.info(f"   AI:   {len(ai_existing)} изображений")
+            logger.info("   Пропускаем загрузку из HuggingFace")
+            real_paths = [str(p) for p in real_existing]
+            ai_paths = [str(p) for p in ai_existing]
+        else:
+            real_paths = None
+            ai_paths = None
+    else:
+        real_paths = None
+        ai_paths = None
+    
+    # Загрузка реальных изображений из ImageNet-1k (HuggingFace) если нужно
+    if not real_paths:
+        real_paths = collect_imagenet_hf(
+            max_samples=config.data.hf_imagenet_max_samples,
+            split=config.data.hf_imagenet_split
+        )
 
-    # Загрузка AI-сгенерированных изображений
-    ai_paths = collect_hf_dataset(
-        config.data.hf_dataset_name,
-        config.data.hf_dataset_split
-    )
+    # Загрузка AI-сгенерированных изображений если нужно
+    if not ai_paths:
+        ai_paths = collect_hf_dataset(
+            config.data.hf_dataset_name,
+            config.data.hf_dataset_split,
+            max_samples=config.data.hf_dataset_max_samples
+        )
 
     if not real_paths or not ai_paths:
         raise ValueError("Не удалось загрузить данные. Проверьте подключение к HuggingFace.")
@@ -681,31 +711,48 @@ def create_dataloaders(train_dataset: Dataset,
                        batch_size: int = 256,
                        num_workers: int = 4,
                        pin_memory: bool = True) -> Tuple[DataLoader, DataLoader, DataLoader]:
-    """Создание DataLoader'ов"""
+    """Создание DataLoader'ов с оптимизациями производительности"""
     
     from torch.utils.data import IterableDataset
     
-    # Для IterableDataset (streaming) нельзя использовать shuffle=True
-    # Данные уже перемешаны через HF dataset.shuffle()
+    # Определяем тип датасета: IterableDataset (streaming) vs обычный Dataset (скачанный)
     is_train_streaming = isinstance(train_dataset, IterableDataset)
+    
+    # Настройки в зависимости от типа данных
+    if is_train_streaming:
+        # Streaming mode: ограничиваем workers, shuffle невозможен
+        effective_workers = min(num_workers, 4)  # Меньше workers для streaming
+        train_shuffle = False
+        prefetch_factor = 2
+        persistent_workers = False
+        logger.info("📡 DataLoader: streaming mode (shuffle=False, persistent_workers=False)")
+    else:
+        # Локальные данные: полная производительность
+        effective_workers = num_workers
+        train_shuffle = True  # ✅ Shuffle для train при локальных данных
+        prefetch_factor = 4
+        persistent_workers = True
+        logger.info("💾 DataLoader: local data mode (shuffle=True, persistent_workers=True)")
     
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=False,  # Streaming mode не поддерживает shuffle
-        num_workers=num_workers,
+        shuffle=train_shuffle,  # True для локальных данных, False для streaming
+        num_workers=effective_workers,
         pin_memory=pin_memory,
-        drop_last=False,  # Не дропаем последний батч
-        prefetch_factor=2 if not is_train_streaming else None  # Prefetch только для не-streaming
+        drop_last=False,
+        prefetch_factor=prefetch_factor if effective_workers > 0 else None,
+        persistent_workers=persistent_workers
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=num_workers,  # Для val/test можно больше workers
         pin_memory=pin_memory,
-        prefetch_factor=2
+        prefetch_factor=4 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0
     )
     
     test_loader = DataLoader(
@@ -714,7 +761,8 @@ def create_dataloaders(train_dataset: Dataset,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        prefetch_factor=2
+        prefetch_factor=4 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0
     )
     
     return train_loader, val_loader, test_loader
