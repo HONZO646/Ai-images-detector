@@ -39,7 +39,7 @@ class NPRFeatureExtractor(nn.Module):
         center = x_padded[:, :, 1:-1, 1:-1]  # [B, 1, H, W]
         
         features = []
-        eps = 1e-12
+        eps = 1e-6
         
         for i in range(8):
             dy, dx = self.directions[i].long()
@@ -53,8 +53,8 @@ class NPRFeatureExtractor(nn.Module):
             
             # Статистики
             mean = diff_flat.mean(dim=1, keepdim=True)
-            std = diff_flat.std(dim=1, keepdim=True) + eps
-            std = std.clamp(min=eps)
+            variance = diff_flat.var(dim=1, keepdim=True)
+            std = torch.sqrt(variance + eps)
             
             # Skewness
             diff_centered = diff_flat - mean
@@ -97,7 +97,7 @@ class SobelExtractor(nn.Module):
         dy = F.conv2d(x, self.sobel_y, padding=1)
         
         # Magnitude
-        magnitude = torch.sqrt(dx ** 2 + dy ** 2 + 1e-12)
+        magnitude = torch.sqrt(dx ** 2 + dy ** 2 + 1e-6)
         
         # Статистики
         dx_mean = dx.reshape(x.shape[0], -1).mean(dim=1, keepdim=True)
@@ -158,7 +158,7 @@ class LBPExtractor(nn.Module):
         uniform_ratio = (transitions <= 2).float().mean(dim=1, keepdim=True)  # [B, 1]
         
         # Standard deviation
-        ones_std = lbp_codes.std(dim=2).mean(dim=1, keepdim=True)  # [B, 1]
+        ones_std = torch.sqrt(lbp_codes.var(dim=2).clamp(min=1e-6)).mean(dim=1, keepdim=True)  # [B, 1]
         
         return torch.cat([ones_mean, ones_std, uniform_ratio], dim=1)  # [B, 3]
 

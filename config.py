@@ -15,7 +15,7 @@ class DataConfig:
     ai_data_path: str = os.path.join("data", "ai")  # HF generated
     
     # Режим загрузки
-    streaming: bool = True  # False = скачивать на диск, True = стриминг из HF
+    streaming: bool = False  # False = скачивать на диск, True = стриминг из HF
     
     # Размеры
     image_size: int = 256
@@ -33,12 +33,12 @@ class DataConfig:
     # ImageNet-1k: https://huggingface.co/datasets/ILSVRC/imagenet-1k
     hf_imagenet_name: str = "ILSVRC/imagenet-1k"
     hf_imagenet_split: str = "validation"  # val split для реальных изображений
-    hf_imagenet_max_samples: int = 20000
+    hf_imagenet_max_samples: int = 5000
     
     # AI generated dataset
     hf_dataset_name: str = "gasstation/generated-images"
     hf_dataset_split: str = "train"
-    hf_dataset_max_samples: int = 20000  # Сколько AI изображений загружать
+    hf_dataset_max_samples: int = 5000  # Сколько AI изображений загружать
 
 
 @dataclass
@@ -141,7 +141,7 @@ class TrainingConfig:
     device: str = 'cuda'  # auto, cpu, cuda
     
     # Mixed Precision Training
-    use_amp: bool = True  # Automatic Mixed Precision (FP16/BF16)
+    use_amp: bool = False  # Automatic Mixed Precision (FP16/BF16)
     amp_dtype: str = 'float16'  # float16 or bfloat16
     
     # Gradient Accumulation (для эмуляции ещё больших батчей)

@@ -110,8 +110,15 @@ class DCTExtractor(nn.Module):
         num_blocks_h = H // self.block_size
         num_blocks_w = W // self.block_size
         
+        if num_blocks_h == 0 or num_blocks_w == 0:
+            raise ValueError(
+                f"Input is too small for DCT block_size={self.block_size}: got H={H}, W={W}"
+            )
+
         # Reshape в блоки
-        x = x[:, :, :num_blocks_h * self.block_size, :num_blocks_w * self.block_size]
+        h_crop = num_blocks_h * self.block_size
+        w_crop = num_blocks_w * self.block_size
+        x = x[:, :, :h_crop, :w_crop]
         x = x.view(B, C, num_blocks_h, self.block_size, num_blocks_w, self.block_size)
         x = x.permute(0, 1, 2, 4, 3, 5)  # [B, C, num_h, num_w, bs, bs]
         x = x.reshape(B * num_blocks_h * num_blocks_w, C, self.block_size, self.block_size)
@@ -122,7 +129,7 @@ class DCTExtractor(nn.Module):
         # Reshape обратно
         x_dct = x_dct.view(B, num_blocks_h, num_blocks_w, C, self.block_size, self.block_size)
         x_dct = x_dct.permute(0, 3, 1, 4, 2, 5)  # [B, C, num_h, bs_h, num_w, bs_w]
-        x_dct = x_dct.reshape(B, C, H, W)
+        x_dct = x_dct.reshape(B, C, h_crop, w_crop)
         
         return x_dct
     
@@ -150,8 +157,9 @@ class DCTExtractor(nn.Module):
         # Возвращаем статистику AC-коэффициентов
         ac_flat = ac_coeffs.view(B, -1)
         ac_mean = ac_flat.mean(dim=1, keepdim=True)
-        ac_std = ac_flat.std(dim=1, keepdim=True)
-        ac_energy = (ac_flat ** 2).sum(dim=1, keepdim=True)
+        ac_std = torch.sqrt(ac_flat.var(dim=1, keepdim=True) + 1e-6)
+        # Mean energy keeps feature scale stable and AMP-friendly
+        ac_energy = (ac_flat ** 2).mean(dim=1, keepdim=True)
         
         return torch.cat([ac_mean, ac_std, ac_energy], dim=1)
 
@@ -198,7 +206,7 @@ class FFTExtractor(nn.Module):
         x_fft_shifted = torch.fft.fftshift(x_fft)
         
         # Амплитудный спектр (логарифмический)
-        magnitude = torch.log(torch.abs(x_fft_shifted) + 1e-8)
+        magnitude = torch.log(torch.abs(x_fft_shifted) + 1e-6)
         
         # Координаты
         R, Theta = self._create_frequency_coords(H, W, device)
@@ -314,8 +322,9 @@ class FrequencyBranch(nn.Module):
             # Глобальная статистика для каждого поддиапазона
             B = tensor.shape[0]
             mean_feat = tensor.reshape(B, -1).mean(dim=1, keepdim=True)
-            std_feat = tensor.reshape(B, -1).std(dim=1, keepdim=True)
-            energy_feat = (tensor ** 2).reshape(B, -1).sum(dim=1, keepdim=True)
+            std_feat = torch.sqrt(tensor.reshape(B, -1).var(dim=1, keepdim=True) + 1e-6)
+            # Use mean instead of sum to avoid very large magnitudes
+            energy_feat = (tensor ** 2).reshape(B, -1).mean(dim=1, keepdim=True)
             features.append(torch.cat([mean_feat, std_feat, energy_feat], dim=1))
 
         return torch.cat(features, dim=1)

@@ -161,6 +161,7 @@ class Trainer:
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch} [Train]", 
                     total=total_batches)
+        skipped_batches = 0
         
         for batch_idx, (gray, rgb, labels) in enumerate(pbar):
             # Перенос на устройство
@@ -173,9 +174,33 @@ class Trainer:
                 output = self.model(gray, rgb)
                 # Model now returns logits (not probabilities)
                 logits = output['probability'].squeeze()
+
+                if not torch.isfinite(logits).all():
+                    skipped_batches += 1
+                    self.logger.warning(
+                        f"[Train][Epoch {self.current_epoch}] batch {batch_idx}: non-finite logits, batch skipped"
+                    )
+                    if self.use_amp:
+                        self.logger.warning("Отключаю AMP из-за non-finite logits")
+                        self.use_amp = False
+                        self.scaler = None
+                    self.optimizer.zero_grad(set_to_none=True)
+                    continue
                 
                 # Loss on logits (BCEWithLogitsLoss expects raw logits)
                 loss = self.criterion(logits, labels)
+
+            if not torch.isfinite(loss):
+                skipped_batches += 1
+                self.logger.warning(
+                    f"[Train][Epoch {self.current_epoch}] batch {batch_idx}: non-finite loss, batch skipped"
+                )
+                if self.use_amp:
+                    self.logger.warning("Отключаю AMP из-за non-finite loss")
+                    self.use_amp = False
+                    self.scaler = None
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
             
             # Backward pass with gradient scaling
             self.optimizer.zero_grad()
@@ -221,6 +246,11 @@ class Trainer:
         predictions = np.array(predictions)
         targets = np.array(targets)
         metrics = compute_metrics(predictions, targets)
+
+        if skipped_batches > 0:
+            self.logger.warning(
+                f"[Train][Epoch {self.current_epoch}] skipped batches: {skipped_batches}/{total_batches}"
+            )
         
         return {
             'loss': loss_meter.avg,
@@ -239,6 +269,7 @@ class Trainer:
         targets = []
         
         pbar = tqdm(self.val_loader, desc=f"Epoch {self.current_epoch} [Val]")
+        skipped_batches = 0
         
         for gray, rgb, labels in pbar:
             gray = gray.to(self.device, non_blocking=True)
@@ -249,9 +280,23 @@ class Trainer:
             with autocast(device_type=self.device.type, enabled=self.use_amp):
                 output = self.model(gray, rgb)
                 logits = output['probability'].squeeze()
+
+                if not torch.isfinite(logits).all():
+                    skipped_batches += 1
+                    self.logger.warning(
+                        f"[Val][Epoch {self.current_epoch}] non-finite logits, batch skipped"
+                    )
+                    continue
                 
                 # Loss on logits
                 loss = self.criterion(logits, labels)
+
+            if not torch.isfinite(loss):
+                skipped_batches += 1
+                self.logger.warning(
+                    f"[Val][Epoch {self.current_epoch}] non-finite loss, batch skipped"
+                )
+                continue
             
             # Convert logits to probabilities for metrics
             probabilities = torch.sigmoid(logits)
@@ -266,6 +311,11 @@ class Trainer:
         predictions = np.array(predictions)
         targets = np.array(targets)
         metrics = compute_metrics(predictions, targets)
+
+        if skipped_batches > 0:
+            self.logger.warning(
+                f"[Val][Epoch {self.current_epoch}] skipped batches: {skipped_batches}/{len(self.val_loader)}"
+            )
         
         return {
             'loss': loss_meter.avg,
@@ -288,6 +338,7 @@ class Trainer:
         }
         
         pbar = tqdm(self.test_loader, desc="Test Evaluation")
+        skipped_batches = 0
         
         for gray, rgb, labels in pbar:
             gray = gray.to(self.device)
@@ -296,6 +347,12 @@ class Trainer:
             
             output = self.model(gray, rgb)
             logits = output['probability'].squeeze()
+
+            if not torch.isfinite(logits).all():
+                skipped_batches += 1
+                self.logger.warning("[Test] non-finite logits, batch skipped")
+                continue
+
             # Convert logits to probabilities for metrics
             probabilities = torch.sigmoid(logits)
             
@@ -312,6 +369,11 @@ class Trainer:
         predictions = np.array(predictions)
         targets = np.array(targets)
         metrics = compute_metrics(predictions, targets)
+
+        if skipped_batches > 0:
+            self.logger.warning(
+                f"[Test] skipped batches: {skipped_batches}/{len(self.test_loader)}"
+            )
         
         # Средние веса gate
         metrics['gate_weights'] = {
