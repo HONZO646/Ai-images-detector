@@ -10,8 +10,8 @@ from typing import Tuple, Optional
 
 class CrossAttentionFusion(nn.Module):
     """
-    Cross-Attention: Query=semantic, Key/Value=spatial+freq
-    Модель сама решает, какому сигналу доверять
+    Fusion MLP для semantic и spatial+freq признаков.
+    NOTE: для единичного токена attention вырождается, поэтому используем MLP-фьюжн.
     """
     
     def __init__(self, 
@@ -22,37 +22,17 @@ class CrossAttentionFusion(nn.Module):
                  dropout: float = 0.1):
         super().__init__()
         
-        self.n_heads = n_heads
-        self.head_dim = embedding_dim // n_heads
-        
-        assert embedding_dim % n_heads == 0, "embedding_dim must be divisible by n_heads"
-        
-        # Query projection (semantic)
-        self.query_proj = nn.Linear(semantic_dim, embedding_dim)
-        
-        # Key/Value projections (spatial + freq)
-        self.key_proj = nn.Linear(artifact_dim, embedding_dim)
-        self.value_proj = nn.Linear(artifact_dim, embedding_dim)
-        
-        # Multi-head attention
-        self.multihead_attn = nn.MultiheadAttention(
-            embed_dim=embedding_dim,
-            num_heads=n_heads,
-            dropout=dropout,
-            batch_first=True
-        )
-        
-        # Output projection
-        self.output_proj = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim),
+        fusion_in_dim = semantic_dim + artifact_dim
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_in_dim, embedding_dim * 2),
+            nn.LayerNorm(embedding_dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embedding_dim * 2, embedding_dim),
             nn.LayerNorm(embedding_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout)
         )
-        
-        # Layer normalization
-        self.norm1 = nn.LayerNorm(embedding_dim)
-        self.norm2 = nn.LayerNorm(embedding_dim)
     
     def forward(self, 
                 semantic: torch.Tensor,
@@ -64,26 +44,8 @@ class CrossAttentionFusion(nn.Module):
         mask: optional attention mask
         Возвращает: [B, embedding_dim] fused representation
         """
-        # Add sequence dimension for attention
-        semantic_seq = self.query_proj(semantic).unsqueeze(1)  # [B, 1, embedding_dim]
-        artifact_seq = self.key_proj(spatial_freq).unsqueeze(1)  # [B, 1, embedding_dim]
-        value_seq = self.value_proj(spatial_freq).unsqueeze(1)  # [B, 1, embedding_dim]
-        
-        # Cross-attention
-        attn_output, attn_weights = self.multihead_attn(
-            query=semantic_seq,
-            key=artifact_seq,
-            value=value_seq,
-            key_padding_mask=mask
-        )  # [B, 1, embedding_dim]
-        
-        # Residual connection + norm
-        attended = self.norm1(semantic_seq + attn_output)  # [B, 1, embedding_dim]
-        
-        # Output projection
-        output = self.output_proj(attended.squeeze(1))  # [B, embedding_dim]
-        
-        return output
+        fused_input = torch.cat([semantic, spatial_freq], dim=1)
+        return self.fusion(fused_input)
 
 
 class AdaptiveGating(nn.Module):

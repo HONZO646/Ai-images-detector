@@ -398,17 +398,13 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
         # Определяем размеры
         # Для streaming берём оценку из config
         max_real = config.data.hf_imagenet_max_samples
-        max_ai = config.data.hf_imagenet_max_samples  # Будет скорректировано
+        max_ai = config.data.hf_dataset_max_samples
         
         n_total = min(max_real, max_ai) * 2  # approximate
         n_train = int(n_total * train_ratio)
         n_val = int(n_total * val_ratio)
         
         return dataset_shuffled, n_train, n_val
-    
-    # Для простоты: используем все данные для train, без val/test split
-    # В streaming mode это нормально — можно валидироваться на тех же данных
-    # с отложенной оценкой
     
     # Создание streaming wrapper'ов
     real_train = StreamingNPRDataset(
@@ -430,36 +426,47 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
         label=1,
         transform=None,  # AI данные не аугментируем
         target_size=config.data.image_size,
-        max_samples=config.data.hf_imagenet_max_samples
+        max_samples=config.data.hf_dataset_max_samples
     )
     
     # Комбинированный dataset
     train_dataset = CombinedStreamingDataset(real_train, ai_train)
-    
-    # Для val/test в streaming mode можно использовать те же данные
-    # но без аугментаций и с отдельными seed
-    # (В идеале — иметь отдельные val/test датасеты)
-    
-    # Упрощение: используем тот же train dataset для val/test
-    # Это не идеально, но работает для streaming
-    logger.warning("⚠️ Streaming mode: val/test используют те же данные что и train")
-    logger.warning("   Для лучшей оценки используйте отдельные val/test split'ы")
-    
-    val_dataset = StreamingNPRDataset(
+
+    # Валидация/тест: формируем сбалансированные наборы из обоих классов
+    val_real = StreamingNPRDataset(
         hf_dataset=imagenet_full,
         label=0,
         transform=None,
         target_size=config.data.image_size,
         max_samples=int(config.data.hf_imagenet_max_samples * config.data.val_ratio)
     )
-    
-    test_dataset = StreamingNPRDataset(
+
+    val_ai = StreamingNPRDataset(
         hf_dataset=ai_full,
         label=1,
         transform=None,
         target_size=config.data.image_size,
+        max_samples=int(config.data.hf_dataset_max_samples * config.data.val_ratio)
+    )
+
+    test_real = StreamingNPRDataset(
+        hf_dataset=imagenet_full,
+        label=0,
+        transform=None,
+        target_size=config.data.image_size,
         max_samples=int(config.data.hf_imagenet_max_samples * config.data.test_ratio)
     )
+
+    test_ai = StreamingNPRDataset(
+        hf_dataset=ai_full,
+        label=1,
+        transform=None,
+        target_size=config.data.image_size,
+        max_samples=int(config.data.hf_dataset_max_samples * config.data.test_ratio)
+    )
+
+    val_dataset = CombinedStreamingDataset(val_real, val_ai)
+    test_dataset = CombinedStreamingDataset(test_real, test_ai)
     
     return train_dataset, val_dataset, test_dataset
 
@@ -740,7 +747,7 @@ def create_dataloaders(train_dataset: Dataset,
         shuffle=train_shuffle,  # True для локальных данных, False для streaming
         num_workers=effective_workers,
         pin_memory=pin_memory,
-        drop_last=False,
+        drop_last=True,
         prefetch_factor=prefetch_factor if effective_workers > 0 else None,
         persistent_workers=persistent_workers
     )

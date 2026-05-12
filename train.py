@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from typing import Dict, Tuple, Optional
 from tqdm import tqdm
@@ -74,12 +74,7 @@ class Trainer:
         self.optimizer = self._create_optimizer()
         
         # Scheduler
-        self.scheduler = ReduceLROnPlateau(
-            self.optimizer,
-            mode=config.training.scheduler_mode,
-            factor=config.training.scheduler_factor,
-            patience=config.training.scheduler_patience
-        )
+        self.scheduler = self._create_scheduler()
         
         # Метрики
         self.best_val_auc = 0.0
@@ -126,6 +121,31 @@ class Trainer:
             )
         else:
             raise ValueError(f"Unknown optimizer: {self.config.training.optimizer}")
+
+    def _create_scheduler(self):
+        """Создание scheduler с warmup."""
+        scheduler_type = getattr(self.config.training, 'scheduler_type', 'cosine')
+
+        if scheduler_type == 'plateau':
+            return ReduceLROnPlateau(
+                self.optimizer,
+                mode=self.config.training.scheduler_mode,
+                factor=self.config.training.scheduler_factor,
+                patience=self.config.training.scheduler_patience
+            )
+
+        cosine = CosineAnnealingLR(
+            self.optimizer,
+            T_max=max(1, self.config.training.epochs - getattr(self.config.training, 'warmup_epochs', 0)),
+            eta_min=getattr(self.config.training, 'min_learning_rate', 1e-6)
+        )
+
+        warmup_epochs = max(0, getattr(self.config.training, 'warmup_epochs', 0))
+        if warmup_epochs == 0:
+            return cosine
+
+        warmup = LinearLR(self.optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
+        return SequentialLR(self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
     
     def train_epoch(self) -> Dict[str, float]:
         """Один epoch обучения с mixed precision"""
@@ -149,7 +169,7 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
             
             # Forward pass with autocast for mixed precision
-            with autocast(device_type='cuda', enabled=self.use_amp):
+            with autocast(device_type=self.device.type, enabled=self.use_amp):
                 output = self.model(gray, rgb)
                 # Model now returns logits (not probabilities)
                 logits = output['probability'].squeeze()
@@ -226,7 +246,7 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
             
             # Forward pass with autocast
-            with autocast(device_type='cuda', enabled=self.use_amp):
+            with autocast(device_type=self.device.type, enabled=self.use_amp):
                 output = self.model(gray, rgb)
                 logits = output['probability'].squeeze()
                 
@@ -418,7 +438,10 @@ class Trainer:
             
             # Scheduler
             if self.scheduler:
-                self.scheduler.step(val_metrics['auc'])
+                if isinstance(self.scheduler, ReduceLROnPlateau):
+                    self.scheduler.step(val_metrics['auc'])
+                else:
+                    self.scheduler.step()
             
             # Check for improvement
             if val_metrics['auc'] > self.best_val_auc:

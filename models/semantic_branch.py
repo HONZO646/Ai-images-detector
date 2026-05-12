@@ -7,6 +7,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 import os
+import numpy as np
+from PIL import Image
 
 
 class CLIPFeatureExtractor(nn.Module):
@@ -18,6 +20,15 @@ class CLIPFeatureExtractor(nn.Module):
     def __init__(self, model_name: str = 'clip-ViT-B-32', device: str = 'cpu'):
         super().__init__()
         self.model_name = model_name
+
+        self.register_buffer(
+            'clip_mean',
+            torch.tensor([0.48145466, 0.4578275, 0.40821073], dtype=torch.float32).view(1, 3, 1, 1)
+        )
+        self.register_buffer(
+            'clip_std',
+            torch.tensor([0.26862954, 0.26130258, 0.27577711], dtype=torch.float32).view(1, 3, 1, 1)
+        )
         
         # Попытка загрузить sentence-transformers (CLIP)
         try:
@@ -89,7 +100,17 @@ class CLIPFeatureExtractor(nn.Module):
         else:
             # Torchvision CLIP
             with torch.no_grad():
-                return self.model.encode_image(x)
+                x_norm = (x - self.clip_mean) / self.clip_std
+                return self.model.encode_image(x_norm)
+
+    def _tensor_to_pil_list(self, x: torch.Tensor):
+        """Конвертация batch tensor [B,3,H,W] в список PIL.Image для sentence-transformers."""
+        x = x.detach().cpu().clamp(0.0, 1.0)
+        images = []
+        for sample in x:
+            arr = (sample.permute(1, 2, 0).numpy() * 255.0).astype(np.uint8)
+            images.append(Image.fromarray(arr, mode='RGB'))
+        return images
 
 
 class SemanticProjector(nn.Module):

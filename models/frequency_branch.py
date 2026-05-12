@@ -203,21 +203,23 @@ class FFTExtractor(nn.Module):
         # Координаты
         R, Theta = self._create_frequency_coords(H, W, device)
         
-        # Радиальный профиль (усреднение по углам)
-        radial_profile = torch.zeros(B, self.radial_bins, device=device)
-        for i in range(self.radial_bins):
-            r_min = i / self.radial_bins
-            r_max = (i + 1) / self.radial_bins
-            mask = (R >= r_min) & (R < r_max)
-            radial_profile[:, i] = magnitude.reshape(B, -1).masked_fill(~mask.reshape(1, -1), 0).sum(dim=1) / mask.sum()
+        mag_flat = magnitude.reshape(B, -1)
+        r_flat = R.reshape(-1)
+        theta_flat = Theta.reshape(-1)
 
-        # Угловой профиль (усреднение по радиусам)
+        # Радиальный профиль (векторизованный)
+        r_idx = torch.clamp((r_flat * self.radial_bins).long(), 0, self.radial_bins - 1)
+        radial_profile = torch.zeros(B, self.radial_bins, device=device)
+        radial_profile.scatter_add_(1, r_idx.unsqueeze(0).expand(B, -1), mag_flat)
+        radial_counts = torch.bincount(r_idx, minlength=self.radial_bins).float().clamp_min(1.0)
+        radial_profile = radial_profile / radial_counts.unsqueeze(0)
+
+        # Угловой профиль (векторизованный)
+        theta_idx = torch.clamp((theta_flat * self.angular_bins).long(), 0, self.angular_bins - 1)
         angular_profile = torch.zeros(B, self.angular_bins, device=device)
-        for i in range(self.angular_bins):
-            theta_min = i / self.angular_bins
-            theta_max = (i + 1) / self.angular_bins
-            mask = (Theta >= theta_min) & (Theta < theta_max)
-            angular_profile[:, i] = magnitude.reshape(B, -1).masked_fill(~mask.reshape(1, -1), 0).sum(dim=1) / mask.sum()
+        angular_profile.scatter_add_(1, theta_idx.unsqueeze(0).expand(B, -1), mag_flat)
+        angular_counts = torch.bincount(theta_idx, minlength=self.angular_bins).float().clamp_min(1.0)
+        angular_profile = angular_profile / angular_counts.unsqueeze(0)
         
         # Конкатенация
         features = torch.cat([radial_profile, angular_profile], dim=1)

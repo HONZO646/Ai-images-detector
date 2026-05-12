@@ -69,7 +69,7 @@ class ModelConfig:
     """Настройки модели"""
     # NPR Features
     npr_bins: int = 32
-    npr_feature_dim: int = 40  # 8 направлений × 5 статистик
+    npr_feature_dim: int = 32  # 8 направлений × 4 статистики (без entropy)
     
     # Spatial Branch
     spatial_embedding_dim: int = 128
@@ -95,7 +95,7 @@ class ModelConfig:
     attention_dropout: float = 0.1
     
     # Classifier Head
-    hidden_dims: List[int] = field(default_factory=lambda: [256, 128, 64])
+    hidden_dims: List[int] = field(default_factory=lambda: [64, 32])
     dropout_rate: float = 0.3
 
 
@@ -105,7 +105,7 @@ class TrainingConfig:
     # Основные
     batch_size: int = 512  # Увеличено с учётом 24GB VRAM
     epochs: int = 50
-    learning_rate: float = 2e-3  # Увеличено для большего batch size (linear scaling)
+    learning_rate: float = 3e-4
     weight_decay: float = 1e-4
     
     # Optimizer
@@ -113,9 +113,12 @@ class TrainingConfig:
     gradient_clip_norm: float = 1.0
     
     # Scheduler
-    scheduler_mode: str = 'max'  # max для AUC
-    scheduler_factor: float = 0.5
-    scheduler_patience: int = 4
+    scheduler_type: str = 'cosine'  # cosine или plateau
+    scheduler_mode: str = 'max'  # используется только для plateau
+    scheduler_factor: float = 0.5  # используется только для plateau
+    scheduler_patience: int = 4  # используется только для plateau
+    min_learning_rate: float = 1e-6
+    warmup_epochs: int = 3
     
     # Early Stopping
     early_stop_patience: int = 8

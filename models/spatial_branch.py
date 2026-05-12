@@ -12,7 +12,7 @@ from typing import Tuple
 class NPRFeatureExtractor(nn.Module):
     """
     Differentiable NPR (Neighboring Pixel Relationship) extractor
-    3x3 окно, 8 направлений, 5 статистик на каждое
+    3x3 окно, 8 направлений, 4 статистики на каждое
     """
     
     def __init__(self, bins: int = 32):
@@ -28,7 +28,7 @@ class NPRFeatureExtractor(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: [B, 1, H, W] grayscale изображение
-        Возвращает: [B, 40] (8 направлений × 5 статистик)
+        Возвращает: [B, 32] (8 направлений × 4 статистики)
         """
         B, C, H, W = x.shape
         
@@ -64,30 +64,10 @@ class NPRFeatureExtractor(nn.Module):
             std4 = std ** 4
             kurtosis = (diff_centered ** 4).mean(dim=1, keepdim=True) / std4 - 3.0
             
-            # Differential entropy (аппроксимация через гистограмму)
-            # Для batch обрабатываем каждый элемент отдельно
-            entropies = []
-            for b in range(B):
-                d = diff_flat[b]
-                # Нормализация для гистограммы
-                d_min, d_max = d.min(), d.max()
-                if d_max - d_min < eps:
-                    entropies.append(torch.tensor(0.0, device=x.device))
-                    continue
-                
-                # Гистограмма
-                hist = torch.histc(d, bins=self.bins, min=d_min, max=d_max)
-                hist = hist / (hist.sum() + eps)  # Нормализация
-                hist = hist[hist > 0]  # Убираем нули
-                entropy = -torch.sum(hist * torch.log(hist + eps))
-                entropies.append(entropy)
-            
-            entropy = torch.stack(entropies).view(B, 1)
-            
-            # Конкатенация 5 статистик
-            features.append(torch.cat([mean, std, skew, kurtosis, entropy], dim=1))
+            # Конкатенация 4 статистик
+            features.append(torch.cat([mean, std, skew, kurtosis], dim=1))
         
-        # [B, 40]
+        # [B, 32]
         return torch.cat(features, dim=1)
 
 
@@ -188,7 +168,7 @@ class SpatialFusion(nn.Module):
     Fusion модуль для объединения NPR + Sobel + LBP
     """
     
-    def __init__(self, npr_dim: int = 40, sobel_dim: int = 3, lbp_dim: int = 3, 
+    def __init__(self, npr_dim: int = 32, sobel_dim: int = 3, lbp_dim: int = 3,
                  embedding_dim: int = 128):
         super().__init__()
         
@@ -210,7 +190,7 @@ class SpatialFusion(nn.Module):
                 sobel_features: torch.Tensor,
                 lbp_features: torch.Tensor) -> torch.Tensor:
         """
-        npr_features: [B, 40]
+        npr_features: [B, 32]
         sobel_features: [B, 3]
         lbp_features: [B, 3]
         Возвращает: [B, embedding_dim]
@@ -237,7 +217,7 @@ class SpatialBranch(nn.Module):
         )
         
         # Fusion
-        npr_dim = 40  # 8 направлений × 5 статистик
+        npr_dim = 32  # 8 направлений × 4 статистики
         sobel_dim = 3  # dx, dy, magnitude
         lbp_dim = 3  # ones_mean, transitions_mean, uniform_ratio
         

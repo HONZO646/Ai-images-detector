@@ -44,6 +44,13 @@ class NPRDetector(nn.Module):
             input_dim=config.fusion_embedding_dim,
             n_branches=3
         )
+
+        self.fusion_proj = nn.Sequential(
+            nn.Linear(config.fusion_embedding_dim * 2, config.fusion_embedding_dim),
+            nn.LayerNorm(config.fusion_embedding_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(config.dropout_rate)
+        )
         
         # Classifier
         self.classifier = ClassifierHead(
@@ -89,8 +96,8 @@ class NPRDetector(nn.Module):
             freq_emb
         )
         
-        # Комбинация cross-attention и gating
-        final_embedding = (cross_attn_out + fused) / 2.0
+        # Комбинация cross-fusion и gating через learnable projection
+        final_embedding = self.fusion_proj(torch.cat([cross_attn_out, fused], dim=1))
         
         # Classification
         probability = self.classifier(final_embedding)
