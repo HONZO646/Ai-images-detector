@@ -299,21 +299,3 @@ if result['early_exit']:
 else:
     print("Full prediction")
 ```
-
----
-
-## 📝 Лицензия
-
-MIT License
-
----
-
-## 👥 Авторы
-
-Проект разработан в рамках НИРС 10 семестр, BMSTU
-
----
-
-## 📧 Контакты
-
-По вопросам: honzo@example.com

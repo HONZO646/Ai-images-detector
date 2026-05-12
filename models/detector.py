@@ -19,7 +19,7 @@ class NPRDetector(nn.Module):
     Три паралельные ветки + Cross-Attention Fusion
     """
     
-    def __init__(self, config, device: str = 'cpu'):
+    def __init__(self, config, device: str = 'gpu'):
         super().__init__()
         self.config = config
         self.device = device
@@ -27,7 +27,7 @@ class NPRDetector(nn.Module):
         # Ветки
         self.spatial_branch = SpatialBranch(config)
         self.frequency_branch = FrequencyBranch(config)
-        self.semantic_branch = SimpleSemanticBranch(config, device=device)
+        self.semantic_branch = SemanticBranch(config, device=device)
         
         # Fusion модули
         artifact_dim = config.spatial_embedding_dim + config.freq_embedding_dim
@@ -172,7 +172,7 @@ class NPRDetectorWithEarlyExit(NPRDetector):
     Для cascade inference - быстрая классификация уверенных примеров
     """
     
-    def __init__(self, config, device: str = 'cpu', 
+    def __init__(self, config, device: str = 'gpu', 
                  early_exit_threshold: float = 0.7):
         super().__init__(config, device)
         self.early_exit_threshold = early_exit_threshold
@@ -215,7 +215,7 @@ class NPRDetectorWithEarlyExit(NPRDetector):
 # ============================================================
 # Factory функции для удобства
 # ============================================================
-def create_detector(config, device: str = 'cpu', pretrained_path: Optional[str] = None) -> NPRDetector:
+def create_detector(config, device: str = 'gpu', pretrained_path: Optional[str] = None) -> NPRDetector:
     """Создание детектора с опциональной загрузкой весов"""
     
     model = NPRDetector(config, device=device)

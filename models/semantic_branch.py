@@ -54,7 +54,7 @@ class CLIPFeatureExtractor(nn.Module):
     def _load_torchvision_clip(self, device: str):
         """Загрузка CLIP через torchvision"""
         try:
-            import clip
+            import clip  # type: ignore[import-not-found]
             self.model, self.preprocess = clip.load('ViT-B/32', device=device)
             
             # Заморозка

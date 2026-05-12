@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from scipy import stats
 from typing import Tuple
 
 
@@ -54,14 +53,16 @@ class NPRFeatureExtractor(nn.Module):
             
             # Статистики
             mean = diff_flat.mean(dim=1, keepdim=True)
-            std = diff_flat.std(dim=1, keepdim=True)
+            std = diff_flat.std(dim=1, keepdim=True) + eps
+            std = std.clamp(min=eps)
             
             # Skewness
             diff_centered = diff_flat - mean
-            skew = (diff_centered ** 3).mean(dim=1, keepdim=True) / (std ** 3 + eps)
+            skew = (diff_centered ** 3).mean(dim=1, keepdim=True) / (std ** 3)
             
             # Kurtosis (excess)
-            kurtosis = (diff_centered ** 4).mean(dim=1, keepdim=True) / (std ** 4 + eps) - 3.0
+            std4 = std ** 4
+            kurtosis = (diff_centered ** 4).mean(dim=1, keepdim=True) / std4 - 3.0
             
             # Differential entropy (аппроксимация через гистограмму)
             # Для batch обрабатываем каждый элемент отдельно
