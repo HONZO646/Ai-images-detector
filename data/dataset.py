@@ -380,13 +380,15 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
         streaming=True  # ← STREAMING MODE
     )
     
-    # AI generated
+    # AI generated (оставляем только fully synthetic, исключая semisynthetic)
     logger.info(f"📥 AI dataset: {config.data.hf_dataset_name}...")
     ai_full = load_dataset(
         config.data.hf_dataset_name,
         split=config.data.hf_dataset_split,
         streaming=True
     )
+    ai_full = ai_full.filter(lambda item: item.get('media_type', None) == 'synthetic')
+    logger.info("✅ AI streaming dataset отфильтрован: media_type == 'synthetic'")
     
     # Разделение на train/val/test для каждого источника
     def split_streaming_dataset(dataset, train_ratio=0.75, val_ratio=0.15):
@@ -558,6 +560,7 @@ def collect_hf_dataset(dataset_name: str,
         raise ImportError("Установите datasets: pip install datasets")
 
     logger.info(f"Загрузка HF dataset: {dataset_name} (max_samples={max_samples})...")
+    logger.info("Фильтрация AI dataset: сохраняем только media_type == 'synthetic'")
 
     # Используем streaming чтобы не скачивать весь датасет на диск
     ds = load_dataset(dataset_name, split=split, streaming=False)
@@ -568,12 +571,18 @@ def collect_hf_dataset(dataset_name: str,
 
     image_paths = []
     count = 0
+    filtered_out = 0
 
     for idx, item in enumerate(ds):
         if max_samples is not None and count >= max_samples:
             break
             
         try:
+            media_type = item.get('media_type', None)
+            if media_type is not None and media_type != 'synthetic':
+                filtered_out += 1
+                continue
+
             # Предполагаем что изображение в поле 'image'
             img = item['image']
             if img is None:
@@ -598,7 +607,9 @@ def collect_hf_dataset(dataset_name: str,
             logger.warning(f"Ошибка обработки примера {idx}: {e}")
             continue
 
-    logger.info(f"✅ Сохранено {len(image_paths)} AI изображений")
+    logger.info(f"✅ Сохранено {len(image_paths)} AI изображений (synthetic only)")
+    if filtered_out > 0:
+        logger.info(f"   Отфильтровано non-synthetic: {filtered_out}")
 
     return image_paths
 

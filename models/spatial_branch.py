@@ -15,9 +15,8 @@ class NPRFeatureExtractor(nn.Module):
     3x3 окно, 8 направлений, 4 статистики на каждое
     """
     
-    def __init__(self, bins: int = 32):
+    def __init__(self):
         super().__init__()
-        self.bins = bins
         # Веса для 8 направлений (всё differentiable)
         self.register_buffer('directions', torch.tensor([
             [-1, -1], [-1, 0], [-1, 1],  # NW, N, NE
