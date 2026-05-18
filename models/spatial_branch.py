@@ -72,8 +72,11 @@ class NPRFeatureExtractor(nn.Module):
 
 class SobelExtractor(nn.Module):
     """
-    Differentiable Sobel gradient extractor
-    Вычисляет dx, dy, magnitude градиенты
+    Differentiable Sobel gradient extractor.
+    Вычисляет расширенный набор статистик по градиентному полю:
+    mean, std, p90, energy для dx/dy/magnitude,
+    плюс edge_ratio, dx_dy_corr, isotropy, mag_cv.
+    Итого: [B, 16]
     """
     
     def __init__(self):
@@ -89,27 +92,63 @@ class SobelExtractor(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: [B, 1, H, W]
-        Возвращает: [B, 3] (dx_mean, dy_mean, magnitude_mean)
+        Возвращает: [B, 16]
+          dx:  mean, std, p90, energy                (4)
+          dy:  mean, std, p90, energy                (4)
+          mag: mean, std, p90, energy                (4)
+          structural: edge_ratio, dx_dy_corr, isotropy, mag_cv (4)
         """
+        B = x.shape[0]
+        eps = 1e-6
+        
         # Градиенты
         dx = F.conv2d(x, self.sobel_x, padding=1)
         dy = F.conv2d(x, self.sobel_y, padding=1)
         
         # Magnitude
-        magnitude = torch.sqrt(dx ** 2 + dy ** 2 + 1e-6)
+        magnitude = torch.sqrt(dx ** 2 + dy ** 2 + eps)
         
-        # Статистики
-        dx_mean = dx.reshape(x.shape[0], -1).mean(dim=1, keepdim=True)
-        dy_mean = dy.reshape(x.shape[0], -1).mean(dim=1, keepdim=True)
-        mag_mean = magnitude.reshape(x.shape[0], -1).mean(dim=1, keepdim=True)
+        def rich_stats(t: torch.Tensor):
+            """mean, std, 90th percentile, normalised energy → [B, 4]"""
+            flat = t.reshape(B, -1)
+            m   = flat.mean(dim=1, keepdim=True)
+            s   = flat.std(dim=1, keepdim=True).clamp(min=eps)
+            p90 = torch.quantile(flat, 0.90, dim=1, keepdim=True)
+            energy = (flat ** 2).mean(dim=1, keepdim=True)
+            return torch.cat([m, s, p90, energy], dim=1)
         
-        return torch.cat([dx_mean, dy_mean, mag_mean], dim=1)
+        dx_stats  = rich_stats(dx)   # [B, 4]
+        dy_stats  = rich_stats(dy)   # [B, 4]
+        mag_stats = rich_stats(magnitude) # [B, 4]
+        
+        # Дополнительные структурные признаки [B, 4]
+        mag_flat = magnitude.reshape(B, -1)
+        mag_mean = mag_flat.mean(dim=1, keepdim=True)
+        edge_ratio = (mag_flat > mag_mean).float().mean(dim=1, keepdim=True)
+        
+        dx_c = dx.reshape(B, -1) - dx.reshape(B, -1).mean(dim=1, keepdim=True)
+        dy_c = dy.reshape(B, -1) - dy.reshape(B, -1).mean(dim=1, keepdim=True)
+        dx_std = dx.reshape(B, -1).std(dim=1, keepdim=True).clamp(min=eps)
+        dy_std = dy.reshape(B, -1).std(dim=1, keepdim=True).clamp(min=eps)
+        dx_dy_corr = (dx_c * dy_c).mean(dim=1, keepdim=True) / (dx_std * dy_std)
+        
+        isotropy = dx.reshape(B, -1).abs().mean(dim=1, keepdim=True) / (
+            dy.reshape(B, -1).abs().mean(dim=1, keepdim=True) + eps
+        )
+        
+        mag_cv = mag_flat.std(dim=1, keepdim=True) / (mag_mean + eps)
+        
+        extra = torch.cat([edge_ratio, dx_dy_corr, isotropy, mag_cv], dim=1)  # [B, 4]
+        
+        return torch.cat([dx_stats, dy_stats, mag_stats, extra], dim=1)  # [B, 16]
 
 
 class LBPExtractor(nn.Module):
     """
-    Differentiable Local Binary Patterns (LBP)
-    Упрощённая differentiable версия для извлечения текстурных признаков
+    Differentiable Local Binary Patterns (LBP).
+    Расширенная differentiable версия:
+    Гистограмма uniform/non-uniform паттернов (8 bins) + структурные признаки.
+    Итого: [B, 16]
     """
     
     def __init__(self, radius: int = 1, n_points: int = 8):
@@ -120,19 +159,29 @@ class LBPExtractor(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: [B, 1, H, W]
-        Возвращает: [B, 3] (mean, std, uniform_ratio)
+        Возвращает: [B, 16]
+          [0..7]  гистограмма числа единиц в LBP-коде (0..8 единиц)  (8 bins)
+          [8]     uniform_ratio (переходов ≤ 2)
+          [9]     transitions_mean
+          [10]    transitions_std
+          [11]    ones_mean (норм.)
+          [12]    ones_std (норм.)
+          [13]    uniform_ratio верхняя треть
+          [14]    uniform_ratio центральная треть
+          [15]    uniform_ratio нижняя треть
         """
         B, C, H, W = x.shape
         r = self.radius
+        eps = 1e-6
         
         # Центр
         center = x[:, :, r:H-r, r:W-r].reshape(B, -1)  # [B, (H-2r)*(W-2r)]
         
         # 8 направлений (прямые соседи, без интерполяции)
         neighbors_offsets = [
-            (-r, -r), (-r, 0), (-r, r),   # NW, N, NE
-            (0, -r),          (0, r),      # W,      E
-            (r, -r),  (r, 0),  (r, r)      # SW, S, SE
+            (-r, -r), (-r, 0), (-r, r),
+            (0, -r),          (0, r),
+            (r, -r),  (r, 0),  (r, r)
         ]
         
         lbp_codes = []
@@ -147,31 +196,63 @@ class LBPExtractor(nn.Module):
         # Stack: [B, (H-2r)*(W-2r), 8]
         lbp_codes = torch.stack(lbp_codes, dim=2)
         
-        # Статистики
-        # Количество единиц
-        ones_mean = lbp_codes.mean(dim=2).mean(dim=1, keepdim=True)  # [B, 1]
+        # Число единиц в каждом LBP-коде [B, N]
+        ones_per_pix = lbp_codes.sum(dim=2)  # range [0, 8]
         
-        # Количество переходов 0->1 и 1->0 (uniform patterns)
+        # 8-бинная гистограмма [B, 8]
+        hist_bins = 8
+        hist = torch.zeros(B, hist_bins, device=x.device)
+        for b in range(hist_bins):
+            if b < hist_bins - 1:
+                hist[:, b] = (ones_per_pix == b).float().mean(dim=1)
+            else:
+                hist[:, b] = (ones_per_pix >= b).float().mean(dim=1)
+        
+        # Переходы между соседними битами
         diffs = torch.abs(lbp_codes[:, :, 1:] - lbp_codes[:, :, :-1])  # [B, N, 7]
-        transitions = diffs.sum(dim=2)  # [B, N]
+        transitions = diffs.sum(dim=2)  # [B, N], range [0, 7]
+        
         uniform_ratio = (transitions <= 2).float().mean(dim=1, keepdim=True)  # [B, 1]
+        trans_mean = transitions.mean(dim=1, keepdim=True)                    # [B, 1]
+        trans_std  = transitions.std(dim=1, keepdim=True).clamp(min=eps)     # [B, 1]
         
-        # Standard deviation
-        ones_std = torch.sqrt(lbp_codes.var(dim=2).clamp(min=1e-6)).mean(dim=1, keepdim=True)  # [B, 1]
+        ones_mean = ones_per_pix.mean(dim=1, keepdim=True) / 8.0             # [B, 1] нормализовано
+        ones_std  = ones_per_pix.std(dim=1, keepdim=True).clamp(min=eps) / 8.0  # [B, 1] нормализовано
         
-        return torch.cat([ones_mean, ones_std, uniform_ratio], dim=1)  # [B, 3]
+        # Uniform ratio по 3 горизонтальным полосам изображения
+        H_crop = H - 2 * r
+        W_crop = W - 2 * r
+        transitions_spatial = transitions.reshape(B, H_crop, W_crop)  # [B, H', W']
+        h3 = H_crop // 3
+        top_ur    = (transitions_spatial[:, :h3, :] <= 2).float().mean(dim=(1, 2), keepdim=False).unsqueeze(1)
+        center_ur = (transitions_spatial[:, h3:2*h3, :] <= 2).float().mean(dim=(1, 2), keepdim=False).unsqueeze(1)
+        bot_ur    = (transitions_spatial[:, 2*h3:, :] <= 2).float().mean(dim=(1, 2), keepdim=False).unsqueeze(1)
+        
+        return torch.cat([
+            hist,           # [B, 8]
+            uniform_ratio,  # [B, 1]
+            trans_mean,     # [B, 1]
+            trans_std,      # [B, 1]
+            ones_mean,      # [B, 1]
+            ones_std,       # [B, 1]
+            top_ur,         # [B, 1]
+            center_ur,      # [B, 1]
+            bot_ur,         # [B, 1]
+        ], dim=1)  # [B, 16]
 
 
 class SpatialFusion(nn.Module):
     """
-    Fusion модуль для объединения NPR + Sobel + LBP
+    Fusion модуль для объединения NPR + Sobel + LBP.
+    Входные размерности: NPR=32, Sobel=16, LBP=16 → total=64
+    Баланс: NPR 50%, Sobel 25%, LBP 25%.
     """
     
-    def __init__(self, npr_dim: int = 32, sobel_dim: int = 3, lbp_dim: int = 3,
+    def __init__(self, npr_dim: int = 32, sobel_dim: int = 16, lbp_dim: int = 16,
                  embedding_dim: int = 128):
         super().__init__()
         
-        total_dim = npr_dim + sobel_dim + lbp_dim
+        total_dim = npr_dim + sobel_dim + lbp_dim  # 64
         
         self.fusion = nn.Sequential(
             nn.Linear(total_dim, embedding_dim * 2),
@@ -216,9 +297,9 @@ class SpatialBranch(nn.Module):
         )
         
         # Fusion
-        npr_dim = 32  # 8 направлений × 4 статистики
-        sobel_dim = 3  # dx, dy, magnitude
-        lbp_dim = 3  # ones_mean, transitions_mean, uniform_ratio
+        npr_dim   = 32  # 8 направлений × 4 статистики
+        sobel_dim = 16  # 4×3 карты + 4 структурных признака
+        lbp_dim   = 16  # 8-bin гистограмма + 8 структурных признаков
         
         self.fusion = SpatialFusion(
             npr_dim=npr_dim,
