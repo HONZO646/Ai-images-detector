@@ -10,9 +10,10 @@ import os
 @dataclass
 class DataConfig:
     """Настройки данных"""
-    # Пути к данным
-    real_data_path: str = os.path.join("data", "real")  # ImageNet из HF
-    ai_data_path: str = os.path.join("data", "ai")  # HF generated
+    # Пути к данным (сетевая папка)
+    data_root: str = "\\\\192.168.12.19\\1119783\\project"
+    real_data_path: str = os.path.join(data_root, "real", "imagenet")  # ImageNet из HF
+    ai_data_path: str = os.path.join(data_root, "ai_generated")  # HF generated
     
     # Режим загрузки
     streaming: bool = False  # False = скачивать на диск, True = стриминг из HF
@@ -33,12 +34,12 @@ class DataConfig:
     # ImageNet-1k: https://huggingface.co/datasets/ILSVRC/imagenet-1k
     hf_imagenet_name: str = "ILSVRC/imagenet-1k"
     hf_imagenet_split: str = "validation"  # val split для реальных изображений
-    hf_imagenet_max_samples: int = 5000
+    hf_imagenet_max_samples: int = 10000
     
     # AI generated dataset
     hf_dataset_name: str = "gasstation/generated-images"
     hf_dataset_split: str = "train"
-    hf_dataset_max_samples: int = 5000  # Сколько AI изображений загружать
+    hf_dataset_max_samples: int = 10000  # Сколько AI изображений загружать
 
 
 @dataclass

@@ -474,9 +474,10 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
 
 
 def collect_imagenet_hf(max_samples: int = 5000,
-                        cache_dir: str = None,
-                        split: str = 'validation',
-                        streaming: bool = False) -> List[str]:
+                         cache_dir: str = None,
+                         split: str = 'validation',
+                         streaming: bool = False,
+                         output_dir: str = None) -> List[str]:
     """
     Загрузка ImageNet-1k из HuggingFace (ILSVRC/imagenet-1k)
     Возвращает пути к сохранённым реальным изображениям
@@ -486,6 +487,7 @@ def collect_imagenet_hf(max_samples: int = 5000,
         cache_dir: директория кэша для HF datasets
         split: 'validation' или 'train'
         streaming: если True, данные будут стримиться и сохранены локально без полного кэша
+        output_dir: путь для сохранения изображений
     """
     try:
         from datasets import load_dataset
@@ -505,7 +507,10 @@ def collect_imagenet_hf(max_samples: int = 5000,
     )
     
     # Сохранение изображений локально
-    output_dir = Path("data") / "real" / "imagenet"
+    if output_dir is None:
+        output_dir = Path("\\\\192.168.12.19\\1119783\\project") / "real" / "imagenet"
+    else:
+        output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     image_paths = []
@@ -524,9 +529,9 @@ def collect_imagenet_hf(max_samples: int = 5000,
                 img = img.convert('RGB')
             
             label = item.get('label', -1)
-            filename = f"real_{idx:06d}_l{label}.png"
+            filename = f"real_{idx:06d}_l{label}.jpg"
             filepath = output_dir / filename
-            img.save(filepath)
+            img.save(filepath, format='JPEG', quality=90)
             
             image_paths.append(str(filepath))
             count += 1
@@ -546,13 +551,15 @@ def collect_imagenet_hf(max_samples: int = 5000,
 def collect_hf_dataset(dataset_name: str,
                        split: str = 'train',
                        cache_dir: str = None,
-                       max_samples: int = None) -> List[str]:
+                       max_samples: int = None,
+                       output_dir: str = None) -> List[str]:
     """
     Загрузка датасета из HuggingFace
     Возвращает пути к сохранённым изображениям
     
     Args:
         max_samples: максимальное количество изображений (None = все)
+        output_dir: путь для сохранения изображений
     """
     try:
         from datasets import load_dataset
@@ -563,54 +570,53 @@ def collect_hf_dataset(dataset_name: str,
     logger.info("Фильтрация AI dataset: сохраняем только media_type == 'synthetic'")
 
     # Используем streaming чтобы не скачивать весь датасет на диск
-    ds = load_dataset(dataset_name, split=split, streaming=False)
+    ds = load_dataset(dataset_name, split=split, streaming=True)
+    
+    # Применяем фильтрацию synthetic на стороне HF (streaming)
+    ds = ds.filter(lambda item: item.get('media_type', None) == 'synthetic')
+    logger.info("✅ AI streaming dataset отфильтрован: media_type == 'synthetic'")
     
     # Сохранение изображений локально
-    output_dir = Path("data") / "ai_generated"
+    if output_dir is None:
+        output_dir = Path("\\\\192.168.12.19\\1119783\\project") / "ai_generated"
+    else:
+        output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     image_paths = []
     count = 0
-    filtered_out = 0
 
     for idx, item in enumerate(ds):
         if max_samples is not None and count >= max_samples:
             break
             
         try:
-            media_type = item.get('media_type', None)
-            if media_type is not None and media_type != 'synthetic':
-                filtered_out += 1
-                continue
-
             # Предполагаем что изображение в поле 'image'
             img = item['image']
             if img is None:
                 continue
-
+            
             # Конвертация в RGB если нужно
             if img.mode != 'RGB':
                 img = img.convert('RGB')
-
-            # Сохранение
-            filename = f"ai_{idx:06d}.png"
+            
+            # Сохранение в JPEG для экономии места
+            filename = f"ai_{idx:06d}.jpg"
             filepath = output_dir / filename
-            img.save(filepath)
-
+            img.save(filepath, format='JPEG', quality=90)
+            
             image_paths.append(str(filepath))
             count += 1
             
             if max_samples is not None and count % 1000 == 0:
                 logger.info(f"  Сохранено {count}/{max_samples} AI изображений")
-
+        
         except Exception as e:
             logger.warning(f"Ошибка обработки примера {idx}: {e}")
             continue
-
+    
     logger.info(f"✅ Сохранено {len(image_paths)} AI изображений (synthetic only)")
-    if filtered_out > 0:
-        logger.info(f"   Отфильтровано non-synthetic: {filtered_out}")
-
+    
     return image_paths
 
 
@@ -633,12 +639,12 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     logger.info("📁 Используем локальное сохранение данных")
     
     # Проверяем наличие уже скачанных данных
-    real_dir = Path("data") / "real" / "imagenet"
-    ai_dir = Path("data") / "ai_generated"
+    real_dir = Path(config.data.real_data_path)
+    ai_dir = Path(config.data.ai_data_path)
     
     if real_dir.exists() and ai_dir.exists():
-        real_existing = list(real_dir.glob("*.png"))
-        ai_existing = list(ai_dir.glob("*.png"))
+        real_existing = list(real_dir.glob("*.jpg"))
+        ai_existing = list(ai_dir.glob("*.jpg"))
         
         if len(real_existing) > 0 and len(ai_existing) > 0:
             logger.info("✅ Найдены существующие данные на диске:")
@@ -658,7 +664,8 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     if not real_paths:
         real_paths = collect_imagenet_hf(
             max_samples=config.data.hf_imagenet_max_samples,
-            split=config.data.hf_imagenet_split
+            split=config.data.hf_imagenet_split,
+            output_dir=config.data.real_data_path
         )
 
     # Загрузка AI-сгенерированных изображений если нужно
@@ -666,7 +673,8 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
         ai_paths = collect_hf_dataset(
             config.data.hf_dataset_name,
             config.data.hf_dataset_split,
-            max_samples=config.data.hf_dataset_max_samples
+            max_samples=config.data.hf_dataset_max_samples,
+            output_dir=config.data.ai_data_path
         )
 
     if not real_paths or not ai_paths:

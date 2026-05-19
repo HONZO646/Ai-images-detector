@@ -17,6 +17,8 @@ class NPRFeatureExtractor(nn.Module):
     
     def __init__(self):
         super().__init__()
+        # bins не используется напрямую (8 направлений × 4 статистики = 32)
+        # параметр оставлен для совместимости с конфигом
         # Веса для 8 направлений (всё differentiable)
         self.register_buffer('directions', torch.tensor([
             [-1, -1], [-1, 0], [-1, 1],  # NW, N, NE
@@ -289,7 +291,7 @@ class SpatialBranch(nn.Module):
         self.config = config
         
         # Extractors
-        self.npr_extractor = NPRFeatureExtractor(bins=config.npr_bins)
+        self.npr_extractor = NPRFeatureExtractor()
         self.sobel_extractor = SobelExtractor()
         self.lbp_extractor = LBPExtractor(
             radius=config.lbp_radius,
