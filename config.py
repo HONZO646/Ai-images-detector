@@ -34,35 +34,34 @@ class DataConfig:
     # ImageNet-1k: https://huggingface.co/datasets/ILSVRC/imagenet-1k
     hf_imagenet_name: str = "ILSVRC/imagenet-1k"
     hf_imagenet_split: str = "validation"  # val split для реальных изображений
-    hf_imagenet_max_samples: int = 10000
+    hf_imagenet_max_samples: int = 20000
     
     # AI generated dataset
     hf_dataset_name: str = "gasstation/generated-images"
     hf_dataset_split: str = "train"
-    hf_dataset_max_samples: int = 10000  # Сколько AI изображений загружать
+    hf_dataset_max_samples: int = 20000  # Сколько AI изображений загружать
 
 
 @dataclass
 class AugmentationConfig:
-    """Настройки аугментаций (только для train)"""
+    """Настройки аугментаций — имитируют артефакты AI-генерации (только для train real)"""
     enable: bool = True
-    probability: float = 0.4
     
-    # JPEG компрессия
+    # Downscale + Upscale — имитирует AI-апсемплинг
+    downscale_prob: float = 0.5
+    downscale_range: tuple = (0.5, 0.9)  # до какого размера уменьшать
+    
+    # JPEG компрессия — агрессивное сжатие как у AI-изображений
     jpeg_prob: float = 0.4
-    jpeg_quality_range: tuple = (70, 100)
+    jpeg_quality_range: tuple = (40, 70)
     
-    # Gaussian blur
-    blur_prob: float = 0.15
-    blur_radius_options: List[float] = field(default_factory=lambda: [0.5, 1.0, 1.5])
+    # Color Jitter — маскировка стиля датасета
+    color_prob: float = 0.4
+    color_strength: float = 0.08  # ±8% по brightness/contrast/saturation
     
-    # Аддитивный шум
-    noise_prob: float = 0.3
-    noise_sigma: float = 0.01
-    
-    # Контраст
-    contrast_prob: float = 0.2
-    contrast_range: tuple = (0.9, 1.1)
+    # Sharpening — имитация AI over-sharpening
+    sharpen_prob: float = 0.3
+    sharpen_range: tuple = (0.5, 1.0)
 
 
 @dataclass
@@ -156,6 +155,11 @@ class TrainingConfig:
     # Performance optimizations
     compile_model: bool = False  # torch.compile (PyTorch 2.0+, может дать +20% скорости)
     enable_flash_attention: bool = True  # Использовать Flash Attention если доступен
+
+    # Gate Regularization
+    # Предотвращают вырождение AdaptiveGating к semantic-only режиму
+    gate_entropy_weight: float = 0.1   # Entropy reg: поощряет равномерный вклад всех веток
+    gate_penalty_weight: float = 0.05  # Penalty: штрафует semantic gate если он >> 1/n_branches
 
 
 @dataclass

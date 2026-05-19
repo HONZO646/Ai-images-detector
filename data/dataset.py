@@ -158,40 +158,97 @@ class AdditiveNoise:
         return Image.fromarray((noisy * 255).astype(np.uint8), mode='RGB')
 
 
-class ContrastAdjust:
-    """Аугментация: изменение контраста"""
-    
-    def __init__(self, contrast_range: Tuple[float, float] = (0.9, 1.1), prob: float = 0.2):
-        self.contrast_range = contrast_range
+class DownscaleUpscale:
+    """Имитация AI-апсемплинга: downscale → upscale обратно к исходному размеру"""
+
+    def __init__(self, scale_range: Tuple[float, float] = (0.5, 0.9), prob: float = 0.5):
+        self.scale_range = scale_range
         self.prob = prob
-    
+
     def __call__(self, img: Image.Image) -> Image.Image:
         if random.random() > self.prob:
             return img
-        
-        factor = random.uniform(*self.contrast_range)
-        enhancer = ImageEnhance.Contrast(img)
-        return enhancer.enhance(factor)
+
+        scale = random.uniform(*self.scale_range)
+        w, h = img.size
+        new_w, new_h = int(w * scale), int(h * scale)
+
+        img_small = img.resize((new_w, new_h), Image.BILINEAR)
+        img_back = img_small.resize((w, h), Image.BILINEAR)
+
+        return img_back
+
+
+class ColorJitter:
+    """Варьирование цвета для маскировки стиля датасета"""
+
+    def __init__(self,
+                 brightness_range: float = 0.08,
+                 contrast_range: float = 0.08,
+                 saturation_range: float = 0.08,
+                 prob: float = 0.4):
+        self.brightness_range = brightness_range
+        self.contrast_range = contrast_range
+        self.saturation_range = saturation_range
+        self.prob = prob
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.prob:
+            return img
+
+        brightness = 1.0 + random.uniform(-self.brightness_range, self.brightness_range)
+        contrast = 1.0 + random.uniform(-self.contrast_range, self.contrast_range)
+        saturation = 1.0 + random.uniform(-self.saturation_range, self.saturation_range)
+
+        img = ImageEnhance.Brightness(img).enhance(brightness)
+        img = ImageEnhance.Contrast(img).enhance(contrast)
+        img = ImageEnhance.Color(img).enhance(saturation)
+
+        return img
+
+
+class Sharpening:
+    """Имитация AI over-sharpening"""
+
+    def __init__(self, radius_range: Tuple[float, float] = (0.5, 1.0), prob: float = 0.3):
+        self.radius_range = radius_range
+        self.prob = prob
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.prob:
+            return img
+
+        radius = random.uniform(*self.radius_range)
+        return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=150, threshold=2))
 
 
 def create_augmentation_pipeline(enable: bool = True, 
+                                 downscale_prob: float = 0.5,
+                                 downscale_range: tuple = (0.5, 0.9),
                                  jpeg_prob: float = 0.4,
-                                 blur_prob: float = 0.15,
-                                 noise_prob: float = 0.3,
-                                 contrast_prob: float = 0.2,
+                                 jpeg_quality_range: tuple = (40, 70),
+                                 color_prob: float = 0.4,
+                                 color_strength: float = 0.08,
+                                 sharpen_prob: float = 0.3,
+                                 sharpen_range: tuple = (0.5, 1.0),
                                  **kwargs) -> Optional[ComposeTransform]:
-    """Создание pipeline аугментаций"""
-    
+    """Создание pipeline аугментаций, имитирующих артефакты AI-генерации"""
+
     if not enable:
         return None
-    
+
     transforms = [
-        JpegCompression(prob=jpeg_prob),
-        GaussianBlur(prob=blur_prob),
-        AdditiveNoise(prob=noise_prob),
-        ContrastAdjust(prob=contrast_prob)
+        DownscaleUpscale(scale_range=downscale_range, prob=downscale_prob),
+        JpegCompression(quality_range=jpeg_quality_range, prob=jpeg_prob),
+        ColorJitter(
+            brightness_range=color_strength,
+            contrast_range=color_strength,
+            saturation_range=color_strength,
+            prob=color_prob
+        ),
+        Sharpening(radius_range=sharpen_range, prob=sharpen_prob)
     ]
-    
+
     return ComposeTransform(transforms)
 
 
@@ -414,10 +471,14 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
         label=0,
         transform=create_augmentation_pipeline(
             enable=config.augmentation.enable,
+            downscale_prob=config.augmentation.downscale_prob,
+            downscale_range=config.augmentation.downscale_range,
             jpeg_prob=config.augmentation.jpeg_prob,
-            blur_prob=config.augmentation.blur_prob,
-            noise_prob=config.augmentation.noise_prob,
-            contrast_prob=config.augmentation.contrast_prob
+            jpeg_quality_range=config.augmentation.jpeg_quality_range,
+            color_prob=config.augmentation.color_prob,
+            color_strength=config.augmentation.color_strength,
+            sharpen_prob=config.augmentation.sharpen_prob,
+            sharpen_range=config.augmentation.sharpen_range
         ),
         target_size=config.data.image_size,
         max_samples=config.data.hf_imagenet_max_samples
@@ -715,10 +776,14 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     # Аугментации (только для train)
     train_transform = create_augmentation_pipeline(
         enable=config.augmentation.enable,
+        downscale_prob=config.augmentation.downscale_prob,
+        downscale_range=config.augmentation.downscale_range,
         jpeg_prob=config.augmentation.jpeg_prob,
-        blur_prob=config.augmentation.blur_prob,
-        noise_prob=config.augmentation.noise_prob,
-        contrast_prob=config.augmentation.contrast_prob
+        jpeg_quality_range=config.augmentation.jpeg_quality_range,
+        color_prob=config.augmentation.color_prob,
+        color_strength=config.augmentation.color_strength,
+        sharpen_prob=config.augmentation.sharpen_prob,
+        sharpen_range=config.augmentation.sharpen_range
     )
     
     # Создание dataset'ов
