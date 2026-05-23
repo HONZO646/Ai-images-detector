@@ -19,8 +19,8 @@ class DataConfig:
     streaming: bool = False  # False = скачивать на диск, True = стриминг из HF
     
     # Размеры
-    image_size: int = 256
-    min_side: int = 256
+    image_size: int = 640
+    min_side: int = 640
     
     # Сплиты
     train_ratio: float = 0.75
