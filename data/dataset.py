@@ -7,12 +7,27 @@ import random
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 import torch
+import torchvision.transforms.functional as TF
+from torchvision.transforms import Compose, GaussianBlur as TVGaussianBlur
 from torch.utils.data import Dataset, DataLoader, Subset, IterableDataset
 from pathlib import Path
-from typing import Tuple, List, Optional, Dict
+from typing import Tuple, List, Optional, Dict, Callable
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def process_image(img_rgb: Image.Image, transform: Optional[Callable] = None, target_size: int = 256) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Process image: apply transform, resize, convert to tensors"""
+    if transform:
+        img_rgb = transform(img_rgb)
+    
+    img_rgb = img_rgb.resize((target_size, target_size), Image.LANCZOS)
+    
+    rgb_tensor = TF.to_tensor(img_rgb)
+    gray_tensor = TF.to_tensor(img_rgb.convert('L'))
+    
+    return gray_tensor, rgb_tensor
 
 
 class NPRDataset(Dataset):
@@ -25,12 +40,14 @@ class NPRDataset(Dataset):
                  image_paths: List[str],
                  labels: List[int],
                  transform: Optional[callable] = None,
-                 target_size: int = 256):
+                 target_size: int = 256,
+                 aug_factor: int = 1):
         """
         image_paths: список путей к изображениям
         labels: список меток (0=real, 1=ai)
         transform: функция аугментации
         target_size: размер для ресайза
+        aug_factor: коэффициент умножения аугментаций
         """
         assert len(image_paths) == len(labels), "Длины paths и labels должны совпадать"
         
@@ -38,18 +55,22 @@ class NPRDataset(Dataset):
         self.labels = labels
         self.transform = transform
         self.target_size = target_size
+        self.aug_factor = aug_factor
         
         logger.info(f"Создан dataset: {len(image_paths)} изображений")
         logger.info(f"  Real (0): {labels.count(0)}")
         logger.info(f"  AI (1):   {labels.count(1)}")
     
     def __len__(self) -> int:
-        return len(self.image_paths)
+        return len(self.image_paths) * self.aug_factor
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Вычисляем реальный индекс исходного файла
+        real_idx = idx // self.aug_factor
+        
         # Загрузка изображения
-        img_path = self.image_paths[idx]
-        label = self.labels[idx]
+        img_path = self.image_paths[real_idx]
+        label = self.labels[real_idx]
         
         try:
             img_rgb = Image.open(img_path).convert('RGB')
@@ -58,125 +79,37 @@ class NPRDataset(Dataset):
             # Возвращаем чёрное изображение как fallback
             img_rgb = Image.new('RGB', (self.target_size, self.target_size), (0, 0, 0))
         
-        # Аугментации (если есть)
-        if self.transform:
-            img_rgb = self.transform(img_rgb)
-        
-        # Ресайз
-        img_rgb = img_rgb.resize((self.target_size, self.target_size), Image.LANCZOS)
-        
-        # Конвертация в tensor
-        rgb_tensor = self._rgb_to_tensor(img_rgb)
-        
-        # Grayscale
-        gray_tensor = self._rgb_to_grayscale_tensor(img_rgb)
+        # Обработка изображения через общую функцию
+        gray_tensor, rgb_tensor = process_image(img_rgb, self.transform, self.target_size)
         
         label_tensor = torch.tensor(label, dtype=torch.float32)
         
         return gray_tensor, rgb_tensor, label_tensor
-    
-    def _rgb_to_tensor(self, img: Image.Image) -> torch.Tensor:
-        """RGB PIL Image → [C, H, W] tensor в диапазоне [0, 1]"""
-        img_array = np.array(img, dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(img_array).permute(2, 0, 1)  # [C, H, W]
-        return tensor
-    
-    def _rgb_to_grayscale_tensor(self, img: Image.Image) -> torch.Tensor:
-        """RGB PIL Image → [1, H, W] grayscale tensor"""
-        img_gray = img.convert('L')
-        img_array = np.array(img_gray, dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(img_array).unsqueeze(0)  # [1, H, W]
-        return tensor
 
 
-class ComposeTransform:
-    """Композиция аугментаций"""
+class CascadeJpegCompression:
+    """Аугментация: Каскадное JPEG-сжатие (от 1 до 3 последовательных сжатий)"""
     
-    def __init__(self, transforms: List[callable]):
-        self.transforms = transforms
-    
-    def __call__(self, img: Image.Image) -> Image.Image:
-        for transform in self.transforms:
-            img = transform(img)
-        return img
-
-
-class JpegCompression:
-    """Аугментация: JPEG компрессия"""
-    
-    def __init__(self, quality_range: Tuple[int, int] = (70, 100), prob: float = 0.4):
+    def __init__(self, quality_range: Tuple[int, int] = (30, 100), prob: float = 0.5):
         self.quality_range = quality_range
         self.prob = prob
-    
+        
     def __call__(self, img: Image.Image) -> Image.Image:
         if random.random() > self.prob:
             return img
-        
-        quality = random.randint(*self.quality_range)
-        
-        # Сохранение в JPEG и загрузка обратно
+            
         import io
-        buffer = io.BytesIO()
-        img.save(buffer, format='JPEG', quality=quality)
-        buffer.seek(0)
-        return Image.open(buffer).convert('RGB')
-
-
-class GaussianBlur:
-    """Аугментация: Gaussian blur"""
-    
-    def __init__(self, radius_options: List[float] = None, prob: float = 0.15):
-        self.radius_options = radius_options or [0.5, 1.0, 1.5]
-        self.prob = prob
-    
-    def __call__(self, img: Image.Image) -> Image.Image:
-        if random.random() > self.prob:
-            return img
+        # Случайное количество последовательных сжатий от 1 до 3
+        num_compressions = random.randint(1, 3)
         
-        radius = random.choice(self.radius_options)
-        return img.filter(ImageFilter.GaussianBlur(radius=radius))
-
-
-class AdditiveNoise:
-    """Аугментация: аддитивный Gaussian шум"""
-    
-    def __init__(self, sigma: float = 0.01, prob: float = 0.3):
-        self.sigma = sigma
-        self.prob = prob
-    
-    def __call__(self, img: Image.Image) -> Image.Image:
-        if random.random() > self.prob:
-            return img
-        
-        img_array = np.array(img, dtype=np.float32) / 255.0
-        
-        # Добавление шума
-        noise = np.random.normal(0, self.sigma, img_array.shape)
-        noisy = img_array + noise
-        noisy = np.clip(noisy, 0, 1)
-        
-        return Image.fromarray((noisy * 255).astype(np.uint8), mode='RGB')
-
-
-class DownscaleUpscale:
-    """Имитация AI-апсемплинга: downscale → upscale обратно к исходному размеру"""
-
-    def __init__(self, scale_range: Tuple[float, float] = (0.5, 0.9), prob: float = 0.5):
-        self.scale_range = scale_range
-        self.prob = prob
-
-    def __call__(self, img: Image.Image) -> Image.Image:
-        if random.random() > self.prob:
-            return img
-
-        scale = random.uniform(*self.scale_range)
-        w, h = img.size
-        new_w, new_h = int(w * scale), int(h * scale)
-
-        img_small = img.resize((new_w, new_h), Image.BILINEAR)
-        img_back = img_small.resize((w, h), Image.BILINEAR)
-
-        return img_back
+        for _ in range(num_compressions):
+            quality = random.randint(*self.quality_range)
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=quality)
+            buffer.seek(0)
+            img = Image.open(buffer).convert('RGB')
+            
+        return img
 
 
 class ColorJitter:
@@ -207,49 +140,27 @@ class ColorJitter:
         return img
 
 
-class Sharpening:
-    """Имитация AI over-sharpening"""
-
-    def __init__(self, radius_range: Tuple[float, float] = (0.5, 1.0), prob: float = 0.3):
-        self.radius_range = radius_range
-        self.prob = prob
-
-    def __call__(self, img: Image.Image) -> Image.Image:
-        if random.random() > self.prob:
-            return img
-
-        radius = random.uniform(*self.radius_range)
-        return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=150, threshold=2))
-
-
-def create_augmentation_pipeline(enable: bool = True, 
-                                 downscale_prob: float = 0.5,
-                                 downscale_range: tuple = (0.5, 0.9),
-                                 jpeg_prob: float = 0.4,
-                                 jpeg_quality_range: tuple = (40, 70),
+def create_augmentation_pipeline(enable: bool = True,
+                                 jpeg_prob: float = 0.6,
                                  color_prob: float = 0.4,
                                  color_strength: float = 0.08,
-                                 sharpen_prob: float = 0.3,
-                                 sharpen_range: tuple = (0.5, 1.0),
-                                 **kwargs) -> Optional[ComposeTransform]:
-    """Создание pipeline аугментаций, имитирующих артефакты AI-генерации"""
-
+                                 blur_prob: float = 0.2,
+                                 **kwargs) -> Optional[Compose]:
+    """Реалистичный pipeline аугментаций"""
     if not enable:
         return None
 
     transforms = [
-        DownscaleUpscale(scale_range=downscale_range, prob=downscale_prob),
-        JpegCompression(quality_range=jpeg_quality_range, prob=jpeg_prob),
         ColorJitter(
             brightness_range=color_strength,
             contrast_range=color_strength,
             saturation_range=color_strength,
             prob=color_prob
         ),
-        Sharpening(radius_range=sharpen_range, prob=sharpen_prob)
+        TVGaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+        CascadeJpegCompression(quality_range=(30, 100), prob=jpeg_prob)
     ]
-
-    return ComposeTransform(transforms)
+    return Compose(transforms)
 
 
 class StreamingNPRDataset(IterableDataset):
@@ -264,13 +175,15 @@ class StreamingNPRDataset(IterableDataset):
                  label: int,
                  transform: Optional[callable] = None,
                  target_size: int = 256,
-                 max_samples: int = None):
+                 max_samples: int = None,
+                 aug_factor: int = 1):
         """
         hf_dataset: HuggingFace dataset в streaming mode
         label: метка класса (0=real, 1=ai)
         transform: функция аугментации
         target_size: размер для ресайза
         max_samples: ограничение количества (None = все)
+        aug_factor: коэффициент умножения аугментаций
         """
         super().__init__()
         self.hf_dataset = hf_dataset
@@ -278,16 +191,17 @@ class StreamingNPRDataset(IterableDataset):
         self.transform = transform
         self.target_size = target_size
         self.max_samples = max_samples
+        self.aug_factor = aug_factor
         
         # Определение длины (для информации)
         if max_samples is not None:
-            self._len = max_samples
+            self._len = max_samples * aug_factor
         elif hasattr(hf_dataset, '__len__'):
-            self._len = len(hf_dataset)
+            self._len = len(hf_dataset) * aug_factor
         else:
-            self._len = 10000  # fallback estimate
+            self._len = 10000 * aug_factor  # fallback estimate
         
-        logger.info(f"Создан Streaming dataset: label={label}, max_samples={self.max_samples}")
+        logger.info(f"Создан Streaming dataset: label={label}, max_samples={self.max_samples}, aug_factor={aug_factor}")
     
     def __len__(self) -> int:
         return self._len
@@ -300,12 +214,12 @@ class StreamingNPRDataset(IterableDataset):
         max_count = self.max_samples if self.max_samples is not None else float('inf')
         
         while count < max_count:
-            # Создаём новый итератор (на случай если предыдущий исчерпался)
+            # Создаём новый итератор (на случае если предыдущий исчерпался)
             try:
                 if self.max_samples is not None:
                     # HF streaming dataset может иметь .shuffle().take()
                     # Для бесконечности используем shuffle каждый раз
-                    ds = self.hf_dataset.shuffle(seed=42 + count)
+                    ds = self.hf_dataset.shuffle(seed=random.randint(0, 1_000_000))
                     it = iter(ds.take(self.max_samples))
                 else:
                     it = iter(self.hf_dataset)
@@ -329,27 +243,17 @@ class StreamingNPRDataset(IterableDataset):
                     logger.error(f"Ошибка загрузки изображения: {e}")
                     img_rgb = Image.new('RGB', (self.target_size, self.target_size), (0, 0, 0))
                 
-                # Аугментации
-                if self.transform:
-                    img_rgb = self.transform(img_rgb)
-                
-                # Ресайз
-                img_rgb = img_rgb.resize((self.target_size, self.target_size), Image.LANCZOS)
-                
-                # Конвертация в tensor
-                rgb_tensor = self._rgb_to_tensor(img_rgb)
-                gray_tensor = self._rgb_to_grayscale_tensor(img_rgb)
-                
-                label_tensor = torch.tensor(self.label, dtype=torch.float32)
-                
-                yield gray_tensor, rgb_tensor, label_tensor
-                count += 1
-    
-    def _rgb_to_tensor(self, img: Image.Image) -> torch.Tensor:
-        """RGB PIL Image → [C, H, W] tensor в диапазоне [0, 1]"""
-        img_array = np.array(img, dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(img_array).permute(2, 0, 1)
-        return tensor
+                # Выдаём несколько аугментированных версий одного семпла
+                for _ in range(self.aug_factor):
+                    gray_tensor, rgb_tensor = process_image(img_rgb, self.transform, self.target_size)
+                    
+                    label_tensor = torch.tensor(self.label, dtype=torch.float32)
+                    
+                    yield gray_tensor, rgb_tensor, label_tensor
+                    count += 1
+                    
+                    if count >= max_count:
+                        break
     
     def _rgb_to_grayscale_tensor(self, img: Image.Image) -> torch.Tensor:
         """RGB PIL Image → [1, H, W] grayscale tensor"""
@@ -465,21 +369,19 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
         
         return dataset_shuffled, n_train, n_val
     
-    # Создание streaming wrapper'ов
+    # Создание streaming wrapper'ов с применением аугментаций к обоим датасетам
+    train_transform = create_augmentation_pipeline(
+        enable=config.augmentation.enable,
+        jpeg_prob=config.augmentation.jpeg_prob,
+        color_prob=config.augmentation.color_prob,
+        color_strength=config.augmentation.color_strength,
+        blur_prob=config.augmentation.blur_prob
+    )
+    
     real_train = StreamingNPRDataset(
         hf_dataset=imagenet_full,
         label=0,
-        transform=create_augmentation_pipeline(
-            enable=config.augmentation.enable,
-            downscale_prob=config.augmentation.downscale_prob,
-            downscale_range=config.augmentation.downscale_range,
-            jpeg_prob=config.augmentation.jpeg_prob,
-            jpeg_quality_range=config.augmentation.jpeg_quality_range,
-            color_prob=config.augmentation.color_prob,
-            color_strength=config.augmentation.color_strength,
-            sharpen_prob=config.augmentation.sharpen_prob,
-            sharpen_range=config.augmentation.sharpen_range
-        ),
+        transform=train_transform,
         target_size=config.data.image_size,
         max_samples=config.data.hf_imagenet_max_samples
     )
@@ -487,7 +389,7 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
     ai_train = StreamingNPRDataset(
         hf_dataset=ai_full,
         label=1,
-        transform=None,  # AI данные не аугментируем
+        transform=train_transform,
         target_size=config.data.image_size,
         max_samples=config.data.hf_dataset_max_samples
     )
@@ -534,149 +436,77 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
     return train_dataset, val_dataset, test_dataset
 
 
-def collect_imagenet_hf(max_samples: int = 5000,
-                         cache_dir: str = None,
-                         split: str = 'validation',
-                         streaming: bool = False,
-                         output_dir: str = None) -> List[str]:
-    """
-    Загрузка ImageNet-1k из HuggingFace (ILSVRC/imagenet-1k)
-    Возвращает пути к сохранённым реальным изображениям
-    
-    Args:
-        max_samples: максимальное количество изображений
-        cache_dir: директория кэша для HF datasets
-        split: 'validation' или 'train'
-        streaming: если True, данные будут стримиться и сохранены локально без полного кэша
-        output_dir: путь для сохранения изображений
-    """
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        raise ImportError("Установите datasets: pip install datasets")
-    
-    logger.info(f"Загрузка ImageNet-1k из HuggingFace (split={split}, max_samples={max_samples})...")
-    logger.info("⚠️ Требуется аутентификация!")
-    logger.info("   1. Примите лицензию: https://huggingface.co/datasets/ILSVRC/imagenet-1k")
-    logger.info("   2. Выполните: huggingface-cli login")
-    
-    # Используем streaming чтобы не скачивать весь датасет на диск
-    ds = load_dataset(
-        "ILSVRC/imagenet-1k",
-        split=split,
-        streaming=True
-    )
-    
-    # Сохранение изображений локально
-    if output_dir is None:
-        output_dir = Path("\\\\192.168.12.19\\1119783\\project") / "real" / "imagenet"
-    else:
-        output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    image_paths = []
-    count = 0
-    
-    for idx, item in enumerate(ds):
-        if count >= max_samples:
-            break
-            
-        try:
-            img = item['image']
-            if img is None:
-                continue
-            
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            label = item.get('label', -1)
-            filename = f"real_{idx:06d}_l{label}.jpg"
-            filepath = output_dir / filename
-            img.save(filepath, format='JPEG', quality=90)
-            
-            image_paths.append(str(filepath))
-            count += 1
-            
-            if count % 1000 == 0:
-                logger.info(f"  Сохранено {count}/{max_samples} изображений ImageNet")
-            
-        except Exception as e:
-            logger.warning(f"Ошибка обработки примера {idx}: {e}")
-            continue
-    
-    logger.info(f"✅ Сохранено {len(image_paths)} реальных изображений ImageNet")
-    
-    return image_paths
-
-
-def collect_hf_dataset(dataset_name: str,
-                       split: str = 'train',
-                       cache_dir: str = None,
+def download_hf_images(dataset_name: str,
+                       split: str,
+                       output_dir: str,
+                       prefix: str,
                        max_samples: int = None,
-                       output_dir: str = None) -> List[str]:
+                       filter_fn: Callable = None) -> List[str]:
     """
-    Загрузка датасета из HuggingFace
-    Возвращает пути к сохранённым изображениям
+    Универсальная функция для загрузки изображений из HuggingFace dataset
     
     Args:
-        max_samples: максимальное количество изображений (None = все)
-        output_dir: путь для сохранения изображений
+        dataset_name: имя датасета на HuggingFace
+        split: split датасета ('train', 'validation', etc.)
+        output_dir: директория для сохранения
+        prefix: префикс для имен файлов ('real' или 'ai')
+        max_samples: максимальное количество (None = все)
+        filter_fn: функция для фильтрации (принимает item, возвращает bool)
+    
+    Returns:
+        List[str]: пути к сохраненным изображениям
     """
     try:
         from datasets import load_dataset
     except ImportError:
         raise ImportError("Установите datasets: pip install datasets")
-
-    logger.info(f"Загрузка HF dataset: {dataset_name} (max_samples={max_samples})...")
-    logger.info("Фильтрация AI dataset: сохраняем только media_type == 'synthetic'")
-
-    # Используем streaming чтобы не скачивать весь датасет на диск
+    
+    logger.info(f"Загрузка {dataset_name} (split={split}, max_samples={max_samples})...")
+    
+    # Потоковая загрузка
     ds = load_dataset(dataset_name, split=split, streaming=True)
     
-    # Применяем фильтрацию synthetic на стороне HF (streaming)
-    ds = ds.filter(lambda item: item.get('media_type', None) == 'synthetic')
-    logger.info("✅ AI streaming dataset отфильтрован: media_type == 'synthetic'")
+    # Применение фильтра если задан
+    if filter_fn is not None:
+        ds = ds.filter(filter_fn)
+        logger.info(f"✅ Dataset отфильтрован с помощью filter_fn")
     
-    # Сохранение изображений локально
-    if output_dir is None:
-        output_dir = Path("\\\\192.168.12.19\\1119783\\project") / "ai_generated"
-    else:
-        output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    # Создание директории
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
     image_paths = []
     count = 0
-
+    
     for idx, item in enumerate(ds):
         if max_samples is not None and count >= max_samples:
             break
-            
+        
         try:
-            # Предполагаем что изображение в поле 'image'
             img = item['image']
             if img is None:
                 continue
             
-            # Конвертация в RGB если нужно
+            # Конвертация в RGB
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Сохранение в JPEG для экономии места
-            filename = f"ai_{idx:06d}.jpg"
-            filepath = output_dir / filename
+            # Сохранение в JPEG
+            filename = f"{prefix}_{idx:06d}.jpg"
+            filepath = output_path / filename
             img.save(filepath, format='JPEG', quality=90)
             
             image_paths.append(str(filepath))
             count += 1
             
             if max_samples is not None and count % 1000 == 0:
-                logger.info(f"  Сохранено {count}/{max_samples} AI изображений")
+                logger.info(f"  Сохранено {count}/{max_samples} изображений ({prefix})")
         
         except Exception as e:
             logger.warning(f"Ошибка обработки примера {idx}: {e}")
             continue
     
-    logger.info(f"✅ Сохранено {len(image_paths)} AI изображений (synthetic only)")
+    logger.info(f"✅ Сохранено {len(image_paths)} изображений ({prefix})")
     
     return image_paths
 
@@ -723,19 +553,24 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     
     # Загрузка реальных изображений из ImageNet-1k (HuggingFace) если нужно
     if not real_paths:
-        real_paths = collect_imagenet_hf(
-            max_samples=config.data.hf_imagenet_max_samples,
+        real_paths = download_hf_images(
+            dataset_name="ILSVRC/imagenet-1k",
             split=config.data.hf_imagenet_split,
-            output_dir=config.data.real_data_path
+            output_dir=config.data.real_data_path,
+            prefix="real",
+            max_samples=config.data.hf_imagenet_max_samples,
+            filter_fn=None
         )
 
     # Загрузка AI-сгенерированных изображений если нужно
     if not ai_paths:
-        ai_paths = collect_hf_dataset(
-            config.data.hf_dataset_name,
-            config.data.hf_dataset_split,
+        ai_paths = download_hf_images(
+            dataset_name=config.data.hf_dataset_name,
+            split=config.data.hf_dataset_split,
+            output_dir=config.data.ai_data_path,
+            prefix="ai",
             max_samples=config.data.hf_dataset_max_samples,
-            output_dir=config.data.ai_data_path
+            filter_fn=lambda item: item.get('media_type', None) == 'synthetic'
         )
 
     if not real_paths or not ai_paths:
@@ -776,14 +611,10 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     # Аугментации (только для train)
     train_transform = create_augmentation_pipeline(
         enable=config.augmentation.enable,
-        downscale_prob=config.augmentation.downscale_prob,
-        downscale_range=config.augmentation.downscale_range,
         jpeg_prob=config.augmentation.jpeg_prob,
-        jpeg_quality_range=config.augmentation.jpeg_quality_range,
         color_prob=config.augmentation.color_prob,
         color_strength=config.augmentation.color_strength,
-        sharpen_prob=config.augmentation.sharpen_prob,
-        sharpen_range=config.augmentation.sharpen_range
+        blur_prob=config.augmentation.blur_prob
     )
     
     # Создание dataset'ов
@@ -805,6 +636,17 @@ def create_dataloaders(train_dataset: Dataset,
     """Создание DataLoader'ов с оптимизациями производительности"""
     
     from torch.utils.data import IterableDataset
+    
+    # Функция для инициализации worker'ов с правильной рандомизацией
+    def worker_init_fn(worker_id: int):
+        """Установка сидов для каждого worker'а"""
+        worker_seed = torch.initial_seed() % 2**32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+    
+    # Генератор для перемешивания
+    generator = torch.Generator()
+    generator.manual_seed(int(torch.empty((), dtype=torch.int64).random_().item()))
     
     # Определяем тип датасета: IterableDataset (streaming) vs обычный Dataset (скачанный)
     is_train_streaming = isinstance(train_dataset, IterableDataset)
@@ -833,7 +675,9 @@ def create_dataloaders(train_dataset: Dataset,
         pin_memory=pin_memory,
         drop_last=True,
         prefetch_factor=prefetch_factor if effective_workers > 0 else None,
-        persistent_workers=persistent_workers
+        persistent_workers=persistent_workers,
+        worker_init_fn=worker_init_fn if effective_workers > 0 else None,
+        generator=generator if not is_train_streaming else None
     )
     
     val_loader = DataLoader(

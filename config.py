@@ -11,7 +11,7 @@ import os
 class DataConfig:
     """Настройки данных"""
     # Пути к данным (сетевая папка)
-    data_root: str = "\\\\192.168.12.19\\1119783\\project"
+    data_root: str = "C:\\Users\\honzo\\.cache\\huggingface"
     real_data_path: str = os.path.join(data_root, "real", "imagenet")  # ImageNet из HF
     ai_data_path: str = os.path.join(data_root, "ai_generated")  # HF generated
     
@@ -138,7 +138,7 @@ class TrainingConfig:
     best_model_path: str = os.path.join("checkpoints", "best_model.pt")
     
     # Device
-    device: str = 'cuda'  # auto, cpu, cuda
+    device: str = 'auto'  # auto, cpu, cuda
     
     # Mixed Precision Training
     use_amp: bool = False  # Automatic Mixed Precision (FP16/BF16)

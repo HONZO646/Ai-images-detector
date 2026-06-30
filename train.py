@@ -49,8 +49,8 @@ class Trainer:
         self.model = self.model.to(self.device)
         
         # Mixed precision scaler
-        self.use_amp = config.training.use_amp and self.device.type == 'cuda'
-        self.scaler = GradScaler('cuda') if self.use_amp else None
+        self.use_amp = config.training.use_amp and self.device.type == 'auto'
+        self.scaler = GradScaler('auto') if self.use_amp else None
         if self.use_amp:
             logger.info("✅ Mixed Precision Training (AMP) enabled")
         
