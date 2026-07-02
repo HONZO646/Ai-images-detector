@@ -89,6 +89,7 @@ class ModelConfig:
     semantic_embedding_dim: int = 128
     semantic_model_name: str = 'clip-ViT-B-32'
     freeze_semantic: bool = True
+    semantic_unfreeze_last_n_blocks: int = 0  # 0 = полная заморозка, 1-2 = разморозка последних блоков
     
     # Fusion
     fusion_embedding_dim: int = 128
