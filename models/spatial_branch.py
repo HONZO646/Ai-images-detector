@@ -5,7 +5,7 @@ Spatial Branch: NPR + Sobel Gradients + LBP
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, List
+from typing import Tuple, List, Union
 
 
 class NPRFeatureExtractor(nn.Module):
@@ -13,6 +13,8 @@ class NPRFeatureExtractor(nn.Module):
     Differentiable NPR (Neighboring Pixel Relationship) extractor
     3x3 окно, 8 направлений, 4 статистики на каждое
     """
+    
+    directions: torch.Tensor
     
     def __init__(self):
         super().__init__()
@@ -42,7 +44,8 @@ class NPRFeatureExtractor(nn.Module):
         eps = 1e-6
         
         for i in range(8):
-            dy, dx = self.directions[i].long()
+            direction = self.directions[i].long()
+            dy, dx = direction[0].item(), direction[1].item()
             
             # Соседнее направление
             neighbor = x_padded[:, :, 1+dy:H+1+dy, 1+dx:W+1+dx]
@@ -79,6 +82,9 @@ class SobelExtractor(nn.Module):
     плюс edge_ratio, dx_dy_corr, isotropy, mag_cv.
     Итого: [B, 16]
     """
+    
+    sobel_x: torch.Tensor
+    sobel_y: torch.Tensor
     
     def __init__(self):
         super().__init__()
@@ -152,6 +158,8 @@ class LBPExtractor(nn.Module):
     Итого: [B, n_points + 8] (n_points для гистограммы + 8 структурных признаков)
     """
     
+    neighbor_offsets: torch.Tensor
+    
     def __init__(self, radius: int = 1, n_points: int = 8):
         super().__init__()
         self.radius = radius
@@ -159,7 +167,8 @@ class LBPExtractor(nn.Module):
         
         # Precompute neighbor offsets using circular sampling
         # For multi-scale LBP: evenly distribute n_points around circle of given radius
-        angles = torch.linspace(0, 2 * torch.pi, n_points, dtype=torch.float32, endpoint=False)
+        # Note: PyTorch linspace doesn't have endpoint param, so we create n+1 points and exclude last
+        angles = torch.linspace(0, 2 * torch.pi, n_points + 1, dtype=torch.float32)[:-1]
         # Offsets: [n_points, 2] where each row is (dy, dx) for neighbor sampling
         # Using (dy, dx) convention where dy is row offset, dx is column offset
         self.register_buffer('neighbor_offsets', torch.stack([
@@ -291,7 +300,7 @@ class LBPExtractor(nn.Module):
 class SpatialFusion(nn.Module):
     """
     Fusion модуль для объединения NPR + Sobel + LBP.
-    Использует attention-based взвешивание ветвей вместо плоской конкатенации.
+    Использует attention-based взвешивание ветвей.
     Входные размерности: NPR=32, Sobel=16, LBP=16
     """
     
@@ -341,7 +350,12 @@ class SpatialFusion(nn.Module):
                  sobel_features: torch.Tensor,
                  lbp_features: torch.Tensor,
                  return_attention: bool = False,
-                 return_projections: bool = False) -> torch.Tensor:
+                 return_projections: bool = False) -> Union[
+                     torch.Tensor,
+                     Tuple[torch.Tensor, torch.Tensor],
+                     Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+                     Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+                 ]:
         """
         npr_features: [B, 32]
         sobel_features: [B, 16]
