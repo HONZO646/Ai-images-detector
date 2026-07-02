@@ -75,6 +75,7 @@ class ModelConfig:
     spatial_embedding_dim: int = 128
     lbp_radius: int = 1
     lbp_n_points: int = 8
+    lbp_radii: List[int] = field(default_factory=list)  # Multi-scale LBP radii (empty = single scale)
     
     # Frequency Branch
     freq_embedding_dim: int = 128
