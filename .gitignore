@@ -48,6 +48,9 @@ data/real/
 data/ai_generated/
 *.JPEG
 
+# Models
+models/
+
 # Logs
 logs/
 *.log

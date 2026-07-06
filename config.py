@@ -3,7 +3,7 @@
 Все гиперпараметры и настройки в одном месте
 """
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Literal
 import os
 
 
@@ -116,7 +116,7 @@ class TrainingConfig:
     
     # Scheduler
     scheduler_type: str = 'cosine'  # cosine или plateau
-    scheduler_mode: str = 'max'  # используется только для plateau
+    scheduler_mode: Literal['min', 'max'] = 'max'  # используется только для plateau
     scheduler_factor: float = 0.5  # используется только для plateau
     scheduler_patience: int = 4  # используется только для plateau
     min_learning_rate: float = 1e-6
