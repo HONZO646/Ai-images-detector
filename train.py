@@ -16,7 +16,8 @@ from typing import Dict, Tuple, Optional
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from torch.amp import GradScaler, autocast
+from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 
 from config import Config
 from models.detector import NPRDetector, create_detector
@@ -45,12 +46,12 @@ class Trainer:
         set_seed(config.training.seed)
         
         # Model
-        self.model = create_detector(config.model, device=self.device)
+        self.model = create_detector(config.model, device=self.device.type)
         self.model = self.model.to(self.device)
         
         # Mixed precision scaler
-        self.use_amp = config.training.use_amp and self.device.type == 'auto'
-        self.scaler = GradScaler('auto') if self.use_amp else None
+        self.use_amp = config.training.use_amp and self.device.type == 'cuda'
+        self.scaler = GradScaler() if self.use_amp else None
         if self.use_amp:
             logger.info("✅ Mixed Precision Training (AMP) enabled")
         
@@ -250,7 +251,7 @@ class Trainer:
             # Backward pass with gradient scaling
             self.optimizer.zero_grad()
             
-            if self.use_amp:
+            if self.use_amp and self.scaler is not None:
                 self.scaler.scale(loss).backward()
                 
                 # Gradient clipping
@@ -511,9 +512,9 @@ class Trainer:
         self.logger.info("=" * 60)
         self.logger.info("НАЧАЛО ОБУЧЕНИЯ")
         self.logger.info("=" * 60)
-        self.logger.info(f"Train samples: {len(self.train_dataset)}")
-        self.logger.info(f"Val samples:   {len(self.val_dataset)}")
-        self.logger.info(f"Test samples:  {len(self.test_dataset)}")
+        self.logger.info(f"Train samples: {len(self.train_dataset)}") # type: ignore
+        self.logger.info(f"Val samples:   {len(self.val_dataset)}") # type: ignore
+        self.logger.info(f"Test samples:  {len(self.test_dataset)}") # type: ignore
         self.logger.info(f"Batch size:    {self.config.training.batch_size}")
         self.logger.info(f"Learning rate: {self.config.training.learning_rate}")
         self.logger.info(f"Epochs:        {self.config.training.epochs}")
