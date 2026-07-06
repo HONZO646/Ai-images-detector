@@ -95,7 +95,28 @@ def compute_metrics(
 ) -> Dict[str, float]:
     """Вычисление метрик классификации"""
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-    
+
+    predictions = np.asarray(predictions).reshape(-1)
+    targets = np.asarray(targets).reshape(-1)
+
+    finite_mask = np.isfinite(predictions) & np.isfinite(targets)
+    if not np.all(finite_mask):
+        dropped = int((~finite_mask).sum())
+        logging.getLogger(__name__).warning(
+            f"compute_metrics: отброшено {dropped} невалидных (NaN/Inf) предсказаний"
+        )
+        predictions = predictions[finite_mask]
+        targets = targets[finite_mask]
+
+    if predictions.size == 0 or targets.size == 0:
+        return {
+            'accuracy': 0.0,
+            'precision': 0.0,
+            'recall': 0.0,
+            'f1': 0.0,
+            'auc': 0.0
+        }
+
     preds_binary = (predictions >= threshold).astype(int)
     
     metrics = {
@@ -107,7 +128,10 @@ def compute_metrics(
     
     # AUC только если есть оба класса
     if len(np.unique(targets)) > 1:
-        metrics['auc'] = roc_auc_score(targets, predictions)
+        try:
+            metrics['auc'] = roc_auc_score(targets, predictions)
+        except ValueError:
+            metrics['auc'] = 0.0
     else:
         metrics['auc'] = 0.0
     

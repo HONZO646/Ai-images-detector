@@ -33,11 +33,11 @@ class NPRInference:
         self.device = self._get_device(device)
         self.use_cascade = use_cascade
         self.cascade_threshold = cascade_threshold
+        self.config = Config()
         
         # Загрузка модели
-        config = Config()
         self.model = create_detector(
-            config.model,
+            self.config.model,
             device=self.device,
             pretrained_path=checkpoint_path
         )
@@ -60,6 +60,10 @@ class NPRInference:
         """
         # Загрузка
         img_rgb = Image.open(image_path).convert('RGB')
+
+        # Приведение к размеру обучения (стабильная форма для всех веток)
+        target_size = self.config.data.image_size
+        img_rgb = img_rgb.resize((target_size, target_size), Image.LANCZOS)
         
         # RGB tensor [1, 3, H, W]
         rgb_array = np.array(img_rgb, dtype=np.float32) / 255.0

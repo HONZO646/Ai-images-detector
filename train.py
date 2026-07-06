@@ -8,6 +8,7 @@ import logging
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
@@ -48,8 +49,8 @@ class Trainer:
         self.model = self.model.to(self.device)
         
         # Mixed precision scaler
-        self.use_amp = config.training.use_amp and self.device.type == 'cuda'
-        self.scaler = GradScaler('cuda') if self.use_amp else None
+        self.use_amp = config.training.use_amp and self.device.type == 'auto'
+        self.scaler = GradScaler('auto') if self.use_amp else None
         if self.use_amp:
             logger.info("✅ Mixed Precision Training (AMP) enabled")
         
@@ -146,12 +147,51 @@ class Trainer:
 
         warmup = LinearLR(self.optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
         return SequentialLR(self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
-    
+
+    def _compute_gate_regularization(self, gate_weights: torch.Tensor) -> torch.Tensor:
+        """
+        Регуляризация gate weights для предотвращения вырождения к semantic-only режиму.
+
+        Два компонента:
+          1. Entropy loss   — максимизирует энтропию распределения весов,
+                             поощряя все три ветки вносить вклад равномерно.
+                             Max entropy = log(3) ≈ 1.099 при [1/3, 1/3, 1/3].
+          2. Semantic penalty — квадратичный штраф за semantic gate
+                             сверх его «честной доли» 1/n_branches.
+
+        Args:
+            gate_weights: [B, n_branches] — выходы AdaptiveGating (softmax, сумма = 1)
+        Returns:
+            Скалярный регуляризационный loss (добавляется к BCE)
+        """
+        reg_loss = torch.zeros(1, device=gate_weights.device, dtype=gate_weights.dtype).squeeze()
+
+        # 1. Entropy regularization
+        if self.config.training.gate_entropy_weight > 0:
+            eps = 1e-8
+            # Энтропия H = -sum(p * log(p)); при [1/3,1/3,1/3] максимальна
+            entropy = -(gate_weights * torch.log(gate_weights + eps)).sum(dim=1).mean()
+            # Добавляем -entropy в loss, чтобы максимизировать её через gradient descent
+            reg_loss = reg_loss - self.config.training.gate_entropy_weight * entropy
+
+        # 2. Semantic gate penalty
+        if self.config.training.gate_penalty_weight > 0:
+            n = gate_weights.shape[1]
+            uniform_share = 1.0 / n  # 0.333 для трёх веток
+            # Штрафуем квадратично только когда semantic (индекс 0) > uniform_share
+            # F.relu обрезает отрицательные значения — нет штрафа если gate уже ≤ 1/3
+            excess = F.relu(gate_weights[:, 0] - uniform_share).pow(2).mean()
+            reg_loss = reg_loss + self.config.training.gate_penalty_weight * excess
+
+        return reg_loss
+
     def train_epoch(self) -> Dict[str, float]:
         """Один epoch обучения с mixed precision"""
         self.model.train()
         
         loss_meter = AverageMeter()
+        gate_reg_meter = AverageMeter()   # только reg-компонент (для мониторинга)
+        gate_sem_meter = AverageMeter()   # средний вес semantic ветки
         predictions = []
         targets = []
         
@@ -161,6 +201,7 @@ class Trainer:
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch} [Train]", 
                     total=total_batches)
+        skipped_batches = 0
         
         for batch_idx, (gray, rgb, labels) in enumerate(pbar):
             # Перенос на устройство
@@ -173,9 +214,38 @@ class Trainer:
                 output = self.model(gray, rgb)
                 # Model now returns logits (not probabilities)
                 logits = output['probability'].squeeze()
+
+                if not torch.isfinite(logits).all():
+                    skipped_batches += 1
+                    self.logger.warning(
+                        f"[Train][Epoch {self.current_epoch}] batch {batch_idx}: non-finite logits, batch skipped"
+                    )
+                    if self.use_amp:
+                        self.logger.warning("Отключаю AMP из-за non-finite logits")
+                        self.use_amp = False
+                        self.scaler = None
+                    self.optimizer.zero_grad(set_to_none=True)
+                    continue
                 
                 # Loss on logits (BCEWithLogitsLoss expects raw logits)
-                loss = self.criterion(logits, labels)
+                bce_loss = self.criterion(logits, labels)
+
+                # Gate regularization — предотвращает вырождение к semantic-only
+                gate_weights = output['gate_weights']  # [B, 3]
+                gate_reg = self._compute_gate_regularization(gate_weights)
+                loss = bce_loss + gate_reg
+
+            if not torch.isfinite(loss):
+                skipped_batches += 1
+                self.logger.warning(
+                    f"[Train][Epoch {self.current_epoch}] batch {batch_idx}: non-finite loss, batch skipped"
+                )
+                if self.use_amp:
+                    self.logger.warning("Отключаю AMP из-за non-finite loss")
+                    self.use_amp = False
+                    self.scaler = None
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
             
             # Backward pass with gradient scaling
             self.optimizer.zero_grad()
@@ -208,12 +278,16 @@ class Trainer:
             # Метрики — convert logits to probabilities for metrics
             probabilities = torch.sigmoid(logits)
             loss_meter.update(loss.item(), gray.shape[0])
+            gate_reg_meter.update(gate_reg.item(), gray.shape[0])
+            gate_sem_meter.update(gate_weights[:, 0].mean().item(), gray.shape[0])
             predictions.extend(probabilities.detach().cpu().numpy())
             targets.extend(labels.detach().cpu().numpy())
             
             # Progress bar
             pbar.set_postfix({
                 'loss': f"{loss_meter.avg:.4f}",
+                'g_reg': f"{gate_reg_meter.avg:.4f}",
+                'g_sem': f"{gate_sem_meter.avg:.2f}",
                 'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
             })
         
@@ -221,9 +295,16 @@ class Trainer:
         predictions = np.array(predictions)
         targets = np.array(targets)
         metrics = compute_metrics(predictions, targets)
+
+        if skipped_batches > 0:
+            self.logger.warning(
+                f"[Train][Epoch {self.current_epoch}] skipped batches: {skipped_batches}/{total_batches}"
+            )
         
         return {
             'loss': loss_meter.avg,
+            'gate_reg': gate_reg_meter.avg,
+            'gate_sem': gate_sem_meter.avg,
             'accuracy': metrics['accuracy'],
             'auc': metrics.get('auc', 0.0),
             'f1': metrics['f1']
@@ -235,10 +316,12 @@ class Trainer:
         self.model.eval()
         
         loss_meter = AverageMeter()
+        gate_sem_meter = AverageMeter()   # мониторинг semantic gate на val
         predictions = []
         targets = []
         
         pbar = tqdm(self.val_loader, desc=f"Epoch {self.current_epoch} [Val]")
+        skipped_batches = 0
         
         for gray, rgb, labels in pbar:
             gray = gray.to(self.device, non_blocking=True)
@@ -249,26 +332,50 @@ class Trainer:
             with autocast(device_type=self.device.type, enabled=self.use_amp):
                 output = self.model(gray, rgb)
                 logits = output['probability'].squeeze()
+
+                if not torch.isfinite(logits).all():
+                    skipped_batches += 1
+                    self.logger.warning(
+                        f"[Val][Epoch {self.current_epoch}] non-finite logits, batch skipped"
+                    )
+                    continue
                 
                 # Loss on logits
                 loss = self.criterion(logits, labels)
+
+            if not torch.isfinite(loss):
+                skipped_batches += 1
+                self.logger.warning(
+                    f"[Val][Epoch {self.current_epoch}] non-finite loss, batch skipped"
+                )
+                continue
             
             # Convert logits to probabilities for metrics
             probabilities = torch.sigmoid(logits)
             
             loss_meter.update(loss.item(), gray.shape[0])
+            gate_sem_meter.update(output['gate_weights'][:, 0].mean().item(), gray.shape[0])
             predictions.extend(probabilities.cpu().numpy())
             targets.extend(labels.cpu().numpy())
             
-            pbar.set_postfix({'loss': f"{loss_meter.avg:.4f}"})
+            pbar.set_postfix({
+                'loss': f"{loss_meter.avg:.4f}",
+                'g_sem': f"{gate_sem_meter.avg:.2f}"
+            })
         
         # Метрики
         predictions = np.array(predictions)
         targets = np.array(targets)
         metrics = compute_metrics(predictions, targets)
+
+        if skipped_batches > 0:
+            self.logger.warning(
+                f"[Val][Epoch {self.current_epoch}] skipped batches: {skipped_batches}/{len(self.val_loader)}"
+            )
         
         return {
             'loss': loss_meter.avg,
+            'gate_sem': gate_sem_meter.avg,
             'accuracy': metrics['accuracy'],
             'auc': metrics.get('auc', 0.0),
             'f1': metrics['f1']
@@ -288,6 +395,7 @@ class Trainer:
         }
         
         pbar = tqdm(self.test_loader, desc="Test Evaluation")
+        skipped_batches = 0
         
         for gray, rgb, labels in pbar:
             gray = gray.to(self.device)
@@ -296,6 +404,12 @@ class Trainer:
             
             output = self.model(gray, rgb)
             logits = output['probability'].squeeze()
+
+            if not torch.isfinite(logits).all():
+                skipped_batches += 1
+                self.logger.warning("[Test] non-finite logits, batch skipped")
+                continue
+
             # Convert logits to probabilities for metrics
             probabilities = torch.sigmoid(logits)
             
@@ -312,6 +426,11 @@ class Trainer:
         predictions = np.array(predictions)
         targets = np.array(targets)
         metrics = compute_metrics(predictions, targets)
+
+        if skipped_batches > 0:
+            self.logger.warning(
+                f"[Test] skipped batches: {skipped_batches}/{len(self.test_loader)}"
+            )
         
         # Средние веса gate
         metrics['gate_weights'] = {
@@ -429,11 +548,14 @@ class Trainer:
             self.logger.info(
                 f"Epoch {epoch+1}/{self.config.training.epochs} "
                 f"[{elapsed:.0f}s] "
-                f"Train Loss: {train_metrics['loss']:.4f}, "
+                f"Train Loss: {train_metrics['loss']:.4f} "
+                f"(GReg: {train_metrics['gate_reg']:.4f}, "
+                f"SemTrain: {train_metrics['gate_sem']:.3f}), "
                 f"Train Acc: {train_metrics['accuracy']:.4f}, "
                 f"Val Loss: {val_metrics['loss']:.4f}, "
                 f"Val Acc: {val_metrics['accuracy']:.4f}, "
-                f"Val AUC: {val_metrics['auc']:.4f}"
+                f"Val AUC: {val_metrics['auc']:.4f}, "
+                f"SemVal: {val_metrics['gate_sem']:.3f}"
             )
             
             # Scheduler

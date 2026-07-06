@@ -232,7 +232,7 @@ def create_detector(config, device: str = 'gpu', pretrained_path: Optional[str] 
         model.load_state_dict(checkpoint['model_state_dict'])
         print(f"✅ Загружены веса из: {pretrained_path}")
         print(f"   Epoch: {checkpoint.get('epoch', 'N/A')}")
-        print(f"   Val AUC: {checkpoint.get('val_auc', 'N/A'):.4f}")
+        print(f"   Val AUC: {checkpoint.get('val_auc', 'N/A')}")
     
     return model
 

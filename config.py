@@ -10,16 +10,17 @@ import os
 @dataclass
 class DataConfig:
     """Настройки данных"""
-    # Пути к данным
-    real_data_path: str = os.path.join("data", "real")  # ImageNet из HF
-    ai_data_path: str = os.path.join("data", "ai")  # HF generated
+    # Пути к данным (сетевая папка)
+    data_root: str = "C:\\Users\\honzo\\.cache\\huggingface"
+    real_data_path: str = os.path.join(data_root, "real", "imagenet")  # ImageNet из HF
+    ai_data_path: str = os.path.join(data_root, "ai_generated")  # HF generated
     
     # Режим загрузки
-    streaming: bool = True  # False = скачивать на диск, True = стриминг из HF
+    streaming: bool = False  # False = скачивать на диск, True = стриминг из HF
     
     # Размеры
-    image_size: int = 256
-    min_side: int = 256
+    image_size: int = 640
+    min_side: int = 640
     
     # Сплиты
     train_ratio: float = 0.75
@@ -43,25 +44,24 @@ class DataConfig:
 
 @dataclass
 class AugmentationConfig:
-    """Настройки аугментаций (только для train)"""
+    """Настройки аугментаций — имитируют артефакты AI-генерации (только для train real)"""
     enable: bool = True
-    probability: float = 0.4
     
-    # JPEG компрессия
+    # Downscale + Upscale — имитирует AI-апсемплинг
+    downscale_prob: float = 0.5
+    downscale_range: tuple = (0.5, 0.9)  # до какого размера уменьшать
+    
+    # JPEG компрессия — агрессивное сжатие как у AI-изображений
     jpeg_prob: float = 0.4
-    jpeg_quality_range: tuple = (70, 100)
+    jpeg_quality_range: tuple = (40, 70)
     
-    # Gaussian blur
-    blur_prob: float = 0.15
-    blur_radius_options: List[float] = field(default_factory=lambda: [0.5, 1.0, 1.5])
+    # Color Jitter — маскировка стиля датасета
+    color_prob: float = 0.4
+    color_strength: float = 0.08  # ±8% по brightness/contrast/saturation
     
-    # Аддитивный шум
-    noise_prob: float = 0.3
-    noise_sigma: float = 0.01
-    
-    # Контраст
-    contrast_prob: float = 0.2
-    contrast_range: tuple = (0.9, 1.1)
+    # Sharpening — имитация AI over-sharpening
+    sharpen_prob: float = 0.3
+    sharpen_range: tuple = (0.5, 1.0)
 
 
 @dataclass
@@ -75,6 +75,7 @@ class ModelConfig:
     spatial_embedding_dim: int = 128
     lbp_radius: int = 1
     lbp_n_points: int = 8
+    lbp_radii: List[int] = field(default_factory=list)  # Multi-scale LBP radii (empty = single scale)
     
     # Frequency Branch
     freq_embedding_dim: int = 128
@@ -88,6 +89,7 @@ class ModelConfig:
     semantic_embedding_dim: int = 128
     semantic_model_name: str = 'clip-ViT-B-32'
     freeze_semantic: bool = True
+    semantic_unfreeze_last_n_blocks: int = 0  # 0 = полная заморозка, 1-2 = разморозка последних блоков
     
     # Fusion
     fusion_embedding_dim: int = 128
@@ -138,10 +140,10 @@ class TrainingConfig:
     best_model_path: str = os.path.join("checkpoints", "best_model.pt")
     
     # Device
-    device: str = 'cuda'  # auto, cpu, cuda
+    device: str = 'auto'  # auto, cpu, cuda
     
     # Mixed Precision Training
-    use_amp: bool = True  # Automatic Mixed Precision (FP16/BF16)
+    use_amp: bool = False  # Automatic Mixed Precision (FP16/BF16)
     amp_dtype: str = 'float16'  # float16 or bfloat16
     
     # Gradient Accumulation (для эмуляции ещё больших батчей)
@@ -155,6 +157,11 @@ class TrainingConfig:
     # Performance optimizations
     compile_model: bool = False  # torch.compile (PyTorch 2.0+, может дать +20% скорости)
     enable_flash_attention: bool = True  # Использовать Flash Attention если доступен
+
+    # Gate Regularization
+    # Предотвращают вырождение AdaptiveGating к semantic-only режиму
+    gate_entropy_weight: float = 0.1   # Entropy reg: поощряет равномерный вклад всех веток
+    gate_penalty_weight: float = 0.05  # Penalty: штрафует semantic gate если он >> 1/n_branches
 
 
 @dataclass
