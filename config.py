@@ -59,6 +59,8 @@ class AugmentationConfig:
     color_prob: float = 0.4
     color_strength: float = 0.08  # ±8% по brightness/contrast/saturation
     
+    blur_prob: float = 0.2
+    
     # Sharpening — имитация AI over-sharpening
     sharpen_prob: float = 0.3
     sharpen_range: tuple = (0.5, 1.0)

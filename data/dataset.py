@@ -627,6 +627,13 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     return train_dataset, val_dataset, test_dataset
 
 
+def worker_init_fn(worker_id: int):
+    """Установка сидов для каждого worker'а (модульный уровень для pickle)"""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 def create_dataloaders(train_dataset: Dataset,
                        val_dataset: Dataset,
                        test_dataset: Dataset,
@@ -636,13 +643,6 @@ def create_dataloaders(train_dataset: Dataset,
     """Создание DataLoader'ов с оптимизациями производительности"""
     
     from torch.utils.data import IterableDataset
-    
-    # Функция для инициализации worker'ов с правильной рандомизацией
-    def worker_init_fn(worker_id: int):
-        """Установка сидов для каждого worker'а"""
-        worker_seed = torch.initial_seed() % 2**32
-        np.random.seed(worker_seed)
-        random.seed(worker_seed)
     
     # Генератор для перемешивания
     generator = torch.Generator()

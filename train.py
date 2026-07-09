@@ -647,11 +647,22 @@ class Trainer:
 
 def main():
     """Main entry point"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='NPR AI/Real Detector - Training')
+    parser.add_argument('--ui', action='store_true', help='Launch Gradio UI')
+    args = parser.parse_args()
+
+    if args.ui:
+        from gradio_ui import main as ui_main
+        ui_main()
+        return
+
     config = Config()
-    
+
     trainer = Trainer(config)
     test_metrics = trainer.train()
-    
+
     print("\n" + "=" * 60)
     print("РЕЗУЛЬТАТЫ:")
     print(f"  Test Accuracy:  {test_metrics['accuracy']:.4f}")

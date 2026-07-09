@@ -28,3 +28,6 @@ tensorboard>=2.14.0
 # Utilities
 PyYAML>=6.0
 jsonargparse>=4.0.0
+
+# Web Interface
+gradio>=4.0.0

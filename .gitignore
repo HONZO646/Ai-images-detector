@@ -77,3 +77,4 @@ htmlcov/
 # Temporary files
 *.tmp
 temp/
+models/clip-ViT-B-32/tokenizer.json
