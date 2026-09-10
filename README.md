@@ -38,9 +38,9 @@
 │    • Frozen CLIP/ViT → projector → 128-dim       │
 │    • Опционально: inconsistency head              │
 │                                                   │
-│ FUSION: Cross-Attention + Adaptive Gating         │
-│    • Query: semantic, Key/Value: spatial+freq     │
-│    • Динамическое взвешивание веток               │
+│ FUSION: MLP Fusion + Adaptive Gating              │
+ │    • Конкатенация semantic + spatial+freq          │
+ │    • Динамическое взвешивание веток                │
 │                                                   │
 │ OUTPUT: P(AI) ∈ [0, 1] + uncertainty estimate     │
 └──────────────────────────────────────────────────┘
@@ -53,7 +53,7 @@
 | **NPR 3×3** | Ловит checkerboard-артефакты, аномалии локальных корреляций |
 | **MLP классификатор** | Вход — агрегированные статистики, CNN не добавит индукции |
 | **Отдельная семантическая ветка** | Семантика (что?) и артефакты (как?) — разные уровни абстракции |
-| **Cross-attention fusion** | Модель сама решает, какому сигналу доверять |
+| **MLP fusion + gating** | Модель сама решает, какому сигналу доверять |
 | **Differentiable всё** | End-to-end обучение: градиенты текут ко всем модулям |
 
 ---
@@ -63,7 +63,7 @@
 ### Требования
 
 ```bash
-Python >= 3.8
+Python >= 3.10 (3.12 рекомендован для CUDA-сборок PyTorch)
 PyTorch >= 2.0.0
 ```
 
@@ -77,15 +77,18 @@ source .venv/bin/activate  # Linux/Mac
 
 # Установка пакетов
 pip install -r requirements.txt
+
+# Для обучения на GPU — CUDA-сборка PyTorch (см. раздел «Развёртывание на GPU»)
 ```
 
 ### Основные зависимости
 
 - `torch`, `torchvision` — нейросетевые модули
 - `PyWavelets` — вейвлет-преобразования
-- `sentence-transformers` или `clip` — CLIP/ViT features
+- `sentence-transformers`, `transformers` — CLIP/ViT features
+- `datasets` — загрузка данных из HuggingFace
 - `scikit-learn` — метрики
-- `matplotlib`, `seaborn` — визуализация
+- `gradio` — веб-интерфейс
 
 ---
 
@@ -109,7 +112,7 @@ python inference.py \
   --threshold 0.5
 ```
 
-### Cascade mode (быстрый режим)
+### Cascade mode (быстрый режим, экспериментальный)
 
 ```bash
 python inference.py \
@@ -119,46 +122,48 @@ python inference.py \
   --cascade-threshold 0.7
 ```
 
+> ⚠️ Cascade-режим использует spatial embedding через общий classifier
+> (BatchNorm-статистики откалиброваны на fused embedding), поэтому быстрый
+> предикт смещён и порог некалиброван. По умолчанию выключен.
+> ONNX-экспорт не поддерживается: частотная ветка использует `torch.fft`,
+> у которого нет ONNX-операторов.
+
 ---
 
 ## 📚 Обучение
 
 ### Подготовка данных
 
-**🚀 Streaming mode (рекомендуется)** — данные НЕ загружаются на диск!
-
-Данные подгружаются по мере необходимости из HuggingFace, экономя место:
-
-```python
-# В config.py по умолчанию:
-data.streaming = True  # ✅ Данные НЕ сохраняются локально
-```
-
-**📁 Локальное сохранение** — если нужно сохранить данные на диск:
-
-```python
-# В config.py:
-data.streaming = False  # Данные будут сохранены в data/
-```
-
-Источники данных:
-
-1. **Real изображения**: [ImageNet-1k](https://huggingface.co/datasets/ILSVRC/imagenet-1k) (validation split)
-   - 15,000 изображений из ILSVRC/imagenet-1k
-   - Загружается автоматически через `datasets` library
-
-2. **AI изображения**: HuggingFace `gasstation/generated-images`
-   - Можно изменить в `config.py`: `hf_dataset_name`
+**📁 Локальный кэш (рекомендуется для GPU)** — данные выгружаются на диск один раз:
 
 ```bash
-# Автоматическая загрузка данных произойдёт при первом запуске:
-python train.py
+# 1. Принять лицензию ImageNet-1k: https://huggingface.co/datasets/ILSVRC/imagenet-1k
+# 2. huggingface-cli login
+# 3. Выгрузить кэш (реально качаются только нужные сэмплы, streaming внутри)
+python scripts/download_data.py                # 20000+20000 из config.py
+# или меньше:
+python scripts/download_data.py --real-samples 5000 --ai-samples 5000
 
-# Или можно загрузить данные заранее:
-python scripts/download_data.py --imagenet-samples 15000
+# 4. Обучение с локальным кэшем (в config.py data.streaming = False — дефолт)
+python train.py
 ```
 
-> ⚠️ **Важно**: Для доступа к ImageNet-1k на HuggingFace необходимо принять лицензию на странице датасета.
+Кэш хранится в `data/real/imagenet/` и `data/ai_generated/` (gitignored).
+
+**🚀 Streaming mode (fallback)** — данные НЕ сохраняются на диск, подгружаются из HuggingFace по мере необходимости:
+
+```python
+# В config.py: data.streaming = True
+```
+
+Требует постоянного подключения к сети и CPU-декодирования — GPU простаивает.
+
+Источники данных (настраиваются в `config.py → DataConfig`):
+
+1. **Real изображения**: [ImageNet-1k](https://huggingface.co/datasets/ILSVRC/imagenet-1k)
+2. **AI изображения**: HuggingFace `gasstation/generated-images` (только `media_type == 'synthetic'`)
+
+> ⚠️ **Важно**: Для доступа к ImageNet-1k на HuggingFace необходимо принять лицензию на странице датасета и выполнить `huggingface-cli login`.
 
 ### Запуск обучения
 
@@ -169,18 +174,20 @@ python train.py
 ### Гиперпараметры (в `config.py`)
 
 ```python
-BATCH_SIZE = 256
-LR = 1e-3 (AdamW, weight_decay=1e-4)
+BATCH_SIZE = 64   # RTX 4090 24GB: старт 64, после замера VRAM можно 96-128
+LR = 3e-4 (AdamW, weight_decay=1e-4)
 EPOCHS = 50 (early stop по val_auc, patience=8)
-SCHEDULER = ReduceLROnPlateau(mode='max', factor=0.5, patience=4)
+SCHEDULER = cosine с warmup 3 эпохи (min_lr=1e-6)
+AMP = bfloat16 (на CPU автоматически отключается)
 ```
 
-### Аугментации (только train)
+### Аугментации (train, симметрично обоим классам)
 
-- JPEG компрессия: quality ∈ [70, 100]
-- Gaussian blur: radius ∈ {0.5, 1.0, 1.5}
-- Аддитивный шум: σ=0.01
-- Контраст: factor ∈ [0.9, 1.1]
+- Downscale+upscale (bilinear): prob 0.5, масштаб [0.5, 0.9] — имитация AI-апсемплинга
+- Sharpen: prob 0.3, фактор 1.5–2.0 — имитация AI over-sharpening
+- JPEG каскадом 1–3 раза: prob 0.4, quality [40, 70]
+- Color jitter (brightness/contrast/saturation): prob 0.4, ±8%
+- Gaussian blur: prob 0.2, σ ∈ [0.1, 2.0]
 
 ---
 
@@ -217,30 +224,39 @@ python evaluate.py --checkpoint checkpoints/best_model.pt
 ```
 project_root/
 ├── config.py                 # Все гиперпараметры в dataclass
-├── npr.py                    # Original standalone модуль
-├── freq_characteristics_script.py  # FFT analysis script
-├── train.py                  # Полный цикл обучения
+├── train.py                  # Полный цикл обучения (+ --ui для веб-интерфейса)
 ├── evaluate.py               # Метрики + графики
-├── inference.py              # Инференс + ONNX export
+├── inference.py              # Инференс (single/batch/dir/cascade)
+├── gradio_ui.py              # Веб-интерфейс (0.0.0.0:7860)
+├── performance_monitor.py    # Throughput/VRAM мониторинг (подключён в Trainer)
+├── test_dataset.py           # Визуализация одного батча датасета
 ├── utils.py                  # Logger, checkpoint, metrics
 ├── requirements.txt          # Зависимости
 ├── README.md                 # Документация
+├── AGENTS.md                 # Инструкция для AI-агентов (English)
 │
 ├── data/
 │   ├── __init__.py
-│   └── dataset.py           # NPRDataset + prepare_datasets()
+│   ├── dataset.py            # NPRDataset + Streaming + prepare_datasets()
+│   ├── real/imagenet/        # Локальный кэш real (gitignored)
+│   └── ai_generated/         # Локальный кэш AI (gitignored)
 │
 ├── models/
-│   ├── __init__.py
-│   ├── spatial_branch.py    # NPR + Sobel + LBP
-│   ├── frequency_branch.py  # DWT + DCT + FFT
-│   ├── semantic_branch.py   # Frozen CLIP/ViT
-│   ├── fusion.py            # Cross-Attention + Gating
-│   └── detector.py          # Main detector class
+│   ├── spatial_branch.py     # NPR + Sobel + LBP
+│   ├── frequency_branch.py   # DWT + DCT + FFT
+│   ├── semantic_branch.py    # Frozen CLIP/ViT
+│   ├── fusion.py             # MLP-фьюжн (исторически назван Cross-Attention) + Gating
+│   ├── detector.py           # Main detector class
+│   └── clip-ViT-B-32/        # Локальная копия CLIP (weights не в git)
 │
-├── checkpoints/             # Сохранённые модели
-├── outputs/                 # Графики и метрики
-└── logs/                    # Логи обучения
+├── scripts/
+│   ├── download_data.py      # Выгрузка кэша данных
+│   ├── setup_hf.py           # Проверка HF-доступа
+│   └── DATA_SETUP.md
+│
+├── checkpoints/              # Сохранённые модели (без CLIP-весов)
+├── outputs/                  # Графики и метрики
+└── logs/                     # Логи обучения + performance_report.json
 ```
 
 ---
@@ -261,32 +277,15 @@ project_root/
 
 ### Python API
 
-```python
-from config import Config
-from models.detector import create_detector
-import torch
-from PIL import Image
-import numpy as np
-
-# Загрузка модели
-config = Config()
-model = create_detector(config.model, pretrained_path='checkpoints/best_model.pt')
-model.eval()
-
-# Препроцессинг
-img = Image.open('test.jpg').convert('RGB')
-rgb = torch.from_numpy(np.array(img)/255.0).permute(2,0,1).unsqueeze(0)
-gray = rgb.mean(dim=1, keepdim=True)
-
-# Предсказание (модель возвращает logits, применяем sigmoid для вероятности)
+# Предсказание (модель возвращает logits под ключом 'logits')
 with torch.no_grad():
     output = model(gray, rgb)
-    logits = output['probability']
+    logits = output['logits']
     prob_ai = torch.sigmoid(logits).item()
     print(f"P(AI) = {prob_ai:.4f}")
 ```
 
-### Cascade inference
+### Cascade inference (экспериментально)
 
 ```python
 from models.detector import NPRDetectorWithEarlyExit
@@ -299,3 +298,56 @@ if result['early_exit']:
 else:
     print("Full prediction")
 ```
+
+---
+
+## 🖥️ Развёртывание на GPU (RTX 4090, 24 ГБ)
+
+### 1. Окружение (Python 3.12 рекомендован — стабильные CUDA-колёса)
+
+```bash
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 2. CUDA-сборка PyTorch
+
+```bash
+# Проверить версию CUDA-драйвера:
+nvidia-smi   # правый верхний угол: "CUDA Version: 12.x"
+
+# Для драйвера с CUDA 12.x:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# Проверка:
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+### 3. Данные
+
+```bash
+huggingface-cli login          # токен: https://huggingface.co/settings/tokens
+python scripts/setup_hf.py     # проверка доступа к ImageNet-1k
+python scripts/download_data.py   # кэш 20000+20000 (в data/, ~10-15 ГБ)
+```
+
+### 4. Подбор batch size под VRAM (опционально, есть в performance_monitor)
+
+```bash
+python -c "from config import Config; from models.detector import NPRDetector; from performance_monitor import suggest_batch_size; c=Config(); m=NPRDetector(c.model); print(suggest_batch_size(m, (1,1,640,640), (1,3,640,640)))"
+```
+
+### 5. Обучение
+
+```bash
+python train.py   # в config.py: use_amp=True (bfloat16), num_workers=8, batch_size=64
+```
+
+- Начните с `batch_size=64`, посмотрите `[Perf] Peak VRAM` в логе
+- При запасе (<18 ГБ) поднимайте до 96–128
+- `reproducible=True` в config включает cudnn.deterministic (медленнее) — только для отладки
+- Мониторинг: `logs/performance_report.json`, прогресс `[Perf]` в логе обучения
+
+Ожидаемая ориентация: при 640×640 и bf16-AMP batch 64 занимает ~6–10 ГБ VRAM;
+на batch 96–128 — 12–18 ГБ.

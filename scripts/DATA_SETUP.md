@@ -1,100 +1,82 @@
-# 📥 Инструкция по загрузке данных
+# 📥 Подготовка данных (локальный кэш)
 
-## ImageNet-1k из HuggingFace
+Основной режим обучения — **локальный кэш**: изображения выгружаются на диск один
+раз, дальше обучение идет с shuffle и полной загрузкой GPU.
 
-### 1️⃣ Принятие лицензии
+## 1️⃣ Лицензия и логин
 
-Перед загрузкой необходимо принять лицензию на странице датасета:
+Перед загрузкой ImageNet-1k необходимо принять лицензию на странице датасета:
 
 🔗 **https://huggingface.co/datasets/ILSVRC/imagenet-1k**
 
-Нажмите кнопку **"Agree"** или **"Accept Terms"** на странице датасета.
-
-### 2️⃣ Аутентификация (если требуется)
+Нажмите **"Agree"** / **"Accept Terms"**, затем:
 
 ```bash
-# Установка HF CLI
-pip install huggingface_hub
-
-# Логин
-huggingface-cli login
+huggingface-cli login          # токен: https://huggingface.co/settings/tokens
+python scripts/setup_hf.py     # проверка доступа
 ```
 
-Получите токен на: https://huggingface.co/settings/tokens
-
-### 3️⃣ Загрузка данных
-
-#### Автоматическая загрузка при обучении
+## 2️⃣ Выгрузка кэша
 
 ```bash
-python train.py
+# Полный кэш (20000 real + 20000 ai из config.py)
+python scripts/download_data.py
+
+# Уменьшенный кэш (быстрее, для отладки)
+python scripts/download_data.py --real-samples 5000 --ai-samples 5000
+
+# Свой каталог
+python scripts/download_data.py --data-root data
 ```
 
-Данные загрузятся автоматически при первом запуске.
+Загрузка идёт потоково (качаются только нужные сэмплы). Повторный запуск
+пропускает полные классы (resume).
 
-#### Ручная загрузка заранее
-
-```bash
-python scripts/download_data.py --imagenet-samples 15000
-```
-
-### 4️⃣ Структура сохранённых данных
+## 3️⃣ Структура кэша
 
 ```
 data/
 ├── real/
 │   └── imagenet/
-│       ├── real_000001_l234.png
-│       ├── real_000002_l567.png
+│       ├── real_000000.jpg
 │       └── ...
 └── ai_generated/
-    ├── ai_000000.png
-    ├── ai_000001.png
+    ├── ai_000000.jpg       # только media_type == 'synthetic'
     └── ...
 ```
 
-### 5️⃣ Кэш HuggingFace
+Пути настраиваются в `config.py → DataConfig` (`data_root`, `real_data_path`,
+`ai_data_path`). Каталог `data/` gitignored.
 
-Данные кэшируются в:
+## 4️⃣ Обучение с кэшем
 
-- **Windows**: `%USERPROFILE%\.cache\huggingface\datasets\`
-- **Linux/Mac**: `~/.cache/huggingface/datasets/`
-
-Для очистки кэша:
-
-```bash
-huggingface-cli logout
-rm -rf ~/.cache/huggingface/datasets  # Linux/Mac
-# или
-rmdir /s %USERPROFILE%\.cache\huggingface\datasets  # Windows
-```
-
-### 6️⃣ Настройка в config.py
+В `config.py` (по умолчанию):
 
 ```python
-# В config.py → DataConfig:
-
-# ImageNet-1k
-hf_imagenet_name: str = "ILSVRC/imagenet-1k"
-hf_imagenet_split: str = "validation"  # или 'train'
-hf_imagenet_max_samples: int = 15000
-
-# AI generated
-hf_dataset_name: str = "gasstation/generated-images"
-hf_dataset_split: str = "train"
+data.streaming = False   # локальный кэш
 ```
 
-### ⚠️ Возможные проблемы
+```bash
+python train.py
+```
+
+`prepare_local_datasets` балансирует классы 1:1 (min от каждого), перемешивает
+с фиксированным сидом и делит на train/val/test по `data.{train,val,test}_ratio`.
+
+Если кэш неполон — недостающее автоматически догружается из HuggingFace при
+первом запуске.
+
+## ⚠️ Возможные проблемы
 
 | Проблема | Решение |
 |----------|---------|
-| **Dataset not found** | Проверьте что приняли лицензию |
-| **Authentication required** | Выполните `huggingface-cli login` |
-| **Not enough disk space** | Требуется ~10-20 GB для ImageNet-1k |
-| **Slow download** | Используйте `HF_HUB_ENABLE_HF_TRANSFER=1` |
+| **Dataset not found** | Примите лицензию на странице ImageNet-1k |
+| **Authentication required** | `huggingface-cli login` |
+| **Slow download** | `HF_HUB_ENABLE_HF_TRANSFER=1` |
+| **Пустой кэш при streaming=False** | Запустите `python scripts/download_data.py` |
 
-### 🔗 Ссылки
+## 🔗 Streaming fallback
 
-- ImageNet-1k: https://huggingface.co/datasets/ILSVRC/imagenet-1k
-- HuggingFace Datasets: https://huggingface.co/docs/datasets/
-- HF CLI: https://huggingface.co/docs/huggingface_hub/
+Если диск ограничен — включите `data.streaming = True` в `config.py`
+(см. `STREAMING_MODE.md`). Учтите: GPU будет простаивать в ожидании сети и
+CPU-декодирования.
