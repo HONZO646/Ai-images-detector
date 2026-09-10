@@ -5,6 +5,7 @@ Spatial Branch: NPR + Sobel Gradients + LBP
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from typing import Tuple, List, Union
 
 
@@ -120,7 +121,10 @@ class SobelExtractor(nn.Module):
             flat = t.reshape(B, -1)
             m   = flat.mean(dim=1, keepdim=True)
             s   = flat.std(dim=1, keepdim=True).clamp(min=eps)
-            p90 = torch.quantile(flat, 0.90, dim=1, keepdim=True)
+            # p90 через kthvalue: torch.quantile на CUDA ограничен ~2^24 элементами
+            # (при batch>40 на 640x640 падает) и делает полную сортировку
+            k = max(1, math.ceil(0.90 * flat.shape[1]))
+            p90 = flat.kthvalue(k, dim=1, keepdim=True).values
             energy = (flat ** 2).mean(dim=1, keepdim=True)
             return torch.cat([m, s, p90, energy], dim=1)
         

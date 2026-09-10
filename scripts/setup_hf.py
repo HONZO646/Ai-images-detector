@@ -20,9 +20,9 @@ def check_hf_login():
     
     # Проверка токена
     token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
-    
+
     if token:
-        logger.info("✅ HF_TOKEN найден в环境变量")
+        logger.info("✅ HF_TOKEN найден в переменных окружения")
     else:
         logger.warning("⚠️ HF_TOKEN не найден")
         logger.info("\nДля получения токена:")
@@ -31,7 +31,7 @@ def check_hf_login():
         logger.info("  3. Скопируйте токен")
         logger.info("\nЗатем выполните:")
         logger.info("  huggingface-cli login")
-        logger.info("\nИли установите环境变量:")
+        logger.info("\nИли установите переменную окружения:")
         logger.info("  set HF_TOKEN=your_token_here  (Windows)")
         logger.info("  export HF_TOKEN=your_token_here  (Linux/Mac)")
     

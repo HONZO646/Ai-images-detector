@@ -34,7 +34,14 @@ class NPRInference:
         self.use_cascade = use_cascade
         self.cascade_threshold = cascade_threshold
         self.config = Config()
-        
+
+        if use_cascade:
+            logger.warning(
+                "⚠️ Cascade mode ЭКСПЕРИМЕНТАЛЬНЫЙ: быстрый предикт использует "
+                "spatial embedding через classifier с BatchNorm-статистиками, "
+                "откалиброванными на fused embedding. Порог считать некалиброванным."
+            )
+
         # Загрузка модели
         self.model = create_detector(
             self.config.model,
@@ -105,9 +112,9 @@ class NPRInference:
         """Полный проход через все ветки"""
         with torch.no_grad():
             output = self.model(gray, rgb)
-            
+
             # Model returns logits, apply sigmoid for probability
-            logits = output['probability']
+            logits = output['logits']
             prob_ai = torch.sigmoid(logits).item()
             pred_class = "AI_GENERATED" if prob_ai >= threshold else "REAL"
             confidence = abs(prob_ai - 0.5) * 2
@@ -185,41 +192,27 @@ class NPRInference:
         return results
     
     def export_to_onnx(self, output_path: str, opset_version: int = 14):
-        """Export модели в ONNX формат"""
-        logger.info(f"Exporting to ONNX: {output_path}")
-        
-        # Dummy inputs
-        gray = torch.randn(1, 1, 256, 256).to(self.device)
-        rgb = torch.randn(1, 3, 224, 224).to(self.device)
-        
-        # Export
-        torch.onnx.export(
-            self.model,
-            (gray, rgb),
-            output_path,
-            export_params=True,
-            opset_version=opset_version,
-            do_constant_folding=True,
-            input_names=['gray', 'rgb'],
-            output_names=['probability'],
-            dynamic_axes={
-                'gray': {0: 'batch_size'},
-                'rgb': {0: 'batch_size'},
-                'probability': {0: 'batch_size'}
-            }
+        """Экспорт модели в ONNX — НЕ ПОДДЕРЖИВАЕТСЯ.
+
+        FrequencyBranch использует torch.fft, для которого нет ONNX-операторов;
+        DWT (stride-slicing) и grid_sample в LBP экспортируются ненадёжно.
+        """
+        raise RuntimeError(
+            "ONNX export отключён: FrequencyBranch использует torch.fft "
+            "(нет ONNX-операторов), а DWT/GRID-сэмплирование экспортируются "
+            "ненадёжно. Для ускоренного инференса используйте torch.compile "
+            "или half-precision на GPU."
         )
-        
-        logger.info(f"ONNX model saved: {output_path}")
 
 
 def format_result(result: Dict) -> str:
-    """Форматирование результата для вывода"""
+    """Форматирование результата для вывода (ASCII-only для Windows-консоли)"""
     if 'error' in result:
-        return f"❌ {result['image_path']}: {result['error']}"
-    
-    emoji = "🤖" if result['prediction'] == "AI_GENERATED" else "✅"
-    
-    output = f"{emoji} {result['image_path']}\n"
+        return f"[ERR] {result['image_path']}: {result['error']}"
+
+    tag = "[AI]" if result['prediction'] == "AI_GENERATED" else "[REAL]"
+
+    output = f"{tag} {result['image_path']}\n"
     output += f"   Prediction: {result['prediction']}\n"
     output += f"   P(AI):      {result['probability_ai']:.4f}\n"
     output += f"   Confidence: {result['confidence']:.4f}\n"
@@ -256,17 +249,14 @@ def main():
     # Проверка входных данных
     if not args.image and not args.batch and not args.dir and not args.export_onnx:
         parser.error("Укажите --image, --batch, --dir или --export-onnx")
-    
-    # ONNX export
+
+    # ONNX export — явно отключён (FrequencyBranch/torch.fft не экспортируется)
     if args.export_onnx:
-        inference = NPRInference(
-            args.checkpoint,
-            device=args.device,
-            use_cascade=args.cascade,
-            cascade_threshold=args.cascade_threshold
+        parser.error(
+            "ONNX export отключён: FrequencyBranch использует torch.fft, "
+            "для которого нет ONNX-операторов. "
+            "Для ускорения инференса используйте GPU/bf16."
         )
-        inference.export_to_onnx(args.export_onnx)
-        return
     
     # Создание inference pipeline
     inference = NPRInference(
@@ -312,7 +302,7 @@ def main():
         real_count = sum(1 for r in valid_results if r['prediction'] == 'REAL')
         avg_time = np.mean([r['inference_time_ms'] for r in valid_results])
         
-        print(f"\n📊 Summary:")
+        print(f"\nSummary:")
         print(f"   Total:     {len(valid_results)}")
         print(f"   AI:        {ai_count}")
         print(f"   Real:      {real_count}")

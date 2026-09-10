@@ -10,30 +10,29 @@ import os
 @dataclass
 class DataConfig:
     """Настройки данных"""
-    # Пути к данным (сетевая папка)
-    data_root: str = "C:\\Users\\honzo\\.cache\\huggingface"
+    # Локальный кэш изображений (используется в нестриминговом режиме
+    # и заполняется scripts/download_data.py)
+    data_root: str = "data"
     real_data_path: str = os.path.join(data_root, "real", "imagenet")  # ImageNet из HF
     ai_data_path: str = os.path.join(data_root, "ai_generated")  # HF generated
-    
+
     # Режим загрузки
-    streaming: bool = True  # False = скачивать на диск, True = стриминг из HF
-    
+    # True  = стриминг из HuggingFace (fallback, без записи на диск)
+    # False = локальный кэш (рекомендуется для обучения на GPU)
+    streaming: bool = False
+
     # Размеры
     image_size: int = 640
-    min_side: int = 640
-    
-    # Сплиты
+
+    # Сплиты (доля от каждого класса)
     train_ratio: float = 0.75
     val_ratio: float = 0.15
     test_ratio: float = 0.10
-    
-    # Баланс классов
-    class_balance_ratio: float = 1.0  # 1:1 real:ai
-    
+
     # HuggingFace Datasets
     # ImageNet-1k: https://huggingface.co/datasets/ILSVRC/imagenet-1k
     hf_imagenet_name: str = "ILSVRC/imagenet-1k"
-    hf_imagenet_split: str = "train"  # val split для реальных изображений
+    hf_imagenet_split: str = "train"
     real_max_samples: int = 20000
 
     # AI generated dataset
@@ -44,24 +43,28 @@ class DataConfig:
 
 @dataclass
 class AugmentationConfig:
-    """Настройки аугментаций — имитируют артефакты AI-генерации (только для train real)"""
+    """Настройки аугментаций — имитируют артефакты постобработки AI-генерации.
+
+    Применяются симметрично к обоим классам train-выборки.
+    """
     enable: bool = True
-    
+
     # Downscale + Upscale — имитирует AI-апсемплинг
     downscale_prob: float = 0.5
     downscale_range: tuple = (0.5, 0.9)  # до какого размера уменьшать
-    
+
     # JPEG компрессия — агрессивное сжатие как у AI-изображений
     jpeg_prob: float = 0.4
     jpeg_quality_range: tuple = (40, 70)
-    
+
     # Color Jitter — маскировка стиля датасета
     color_prob: float = 0.4
     color_strength: float = 0.08  # ±8% по brightness/contrast/saturation
-    
+
     blur_prob: float = 0.2
-    
+
     # Sharpening — имитация AI over-sharpening
+    # Фактор = 1.0 + U(sharpen_range): 0.5–1.0 → усиление резкости в 1.5–2x
     sharpen_prob: float = 0.3
     sharpen_range: tuple = (0.5, 1.0)
 
@@ -69,10 +72,6 @@ class AugmentationConfig:
 @dataclass
 class ModelConfig:
     """Настройки модели"""
-    # NPR Features
-    npr_bins: int = 32
-    npr_feature_dim: int = 32  # 8 направлений × 4 статистики (без entropy)
-    
     # Spatial Branch
     spatial_embedding_dim: int = 128
     lbp_radius: int = 1
@@ -105,17 +104,18 @@ class ModelConfig:
 
 @dataclass
 class TrainingConfig:
-    """Настройки обучения с оптимизациями производительности"""
+    """Настройки обучения"""
     # Основные
-    batch_size: int = 64  # Увеличено с учётом 24GB VRAM
+    # Для RTX 4090 (24 ГБ) при 640x640: старт 64, после замера VRAM можно 96-128
+    batch_size: int = 64
     epochs: int = 50
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
-    
+
     # Optimizer
     optimizer: str = 'adamw'  # adamw, adam, sgd
     gradient_clip_norm: float = 1.0
-    
+
     # Scheduler
     scheduler_type: str = 'cosine'  # cosine или plateau
     scheduler_mode: Literal['min', 'max'] = 'max'  # используется только для plateau
@@ -123,42 +123,34 @@ class TrainingConfig:
     scheduler_patience: int = 4  # используется только для plateau
     min_learning_rate: float = 1e-6
     warmup_epochs: int = 3
-    
+
     # Early Stopping
     early_stop_patience: int = 8
     early_stop_metric: str = 'val_auc'
-    
+
     # Loss
     loss_function: str = 'bce'  # bce, bce_with_logits
-    use_contrastive_aux: bool = False
-    contrastive_weight: float = 0.1
-    
+
     # Logging
-    log_interval: int = 10
     save_interval: int = 5
-    
+
     # Checkpoint
     checkpoint_dir: str = os.path.join("checkpoints")
     best_model_path: str = os.path.join("checkpoints", "best_model.pt")
-    
+
     # Device
     device: str = 'auto'  # auto, cpu, cuda
-    
-    # Mixed Precision Training
-    use_amp: bool = False  # Automatic Mixed Precision (FP16/BF16)
-    amp_dtype: str = 'float16'  # float16 or bfloat16
-    
-    # Gradient Accumulation (для эмуляции ещё больших батчей)
-    gradient_accumulation_steps: int = 1  # Увеличьте если нужен effective batch > 512
-    
+
+    # Mixed Precision Training (автоматически отключается на CPU)
+    use_amp: bool = True
+    amp_dtype: str = 'bfloat16'  # bfloat16 (Ada/Ampere+) или float16 (нужен GradScaler)
+
     # Reproducibility
     seed: int = 42
-    num_workers: int = 2
-    pin_memory: bool = False  # True для GPU (ускоряет передачу данных)
-    
-    # Performance optimizations
-    compile_model: bool = False  # torch.compile (PyTorch 2.0+, может дать +20% скорости)
-    enable_flash_attention: bool = True  # Использовать Flash Attention если доступен
+    # False: cudnn.benchmark=True (быстрее на GPU). True: детерминизм ценой скорости
+    reproducible: bool = False
+    num_workers: int = 8
+    pin_memory: bool = True  # ускоряет передачу на GPU (игнорируется на CPU)
 
     # Gate Regularization
     # Предотвращают вырождение AdaptiveGating к semantic-only режиму

@@ -12,14 +12,18 @@ from typing import Dict, Any, Optional
 import json
 
 
-def set_seed(seed: int = 42):
-    """Установка сида для воспроизводимости"""
+def set_seed(seed: int = 42, deterministic: bool = False):
+    """Установка сида для воспроизводимости.
+
+    deterministic=False (по умолчанию): cudnn.benchmark=True — быстрее на GPU.
+    deterministic=True: полная воспроизводимость ценой скорости conv-операций.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
 
 
 def setup_logger(name: str, log_file: Optional[str] = None, level: int = logging.INFO) -> logging.Logger:
@@ -69,17 +73,25 @@ def load_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     device: torch.device = torch.device('cpu')
 ) -> Dict[str, Any]:
-    """Загрузка чекпоинта"""
+    """Загрузка чекпоинта.
+
+    Чекпоинты могут быть slim (без замороженных CLIP-весов) — отсутствующие
+    ключи semantic_branch.clip_extractor остаются от предобученной модели.
+    """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Чекпоинт не найден: {filepath}")
-    
+
     checkpoint = torch.load(filepath, map_location=device, weights_only=False)
-    
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
+
+    missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if unexpected:
+        logging.getLogger(__name__).warning(
+            f"load_checkpoint: неожиданные ключи ({len(unexpected)}), напр.: {unexpected[:5]}"
+        )
+
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    
+
     return checkpoint
 
 

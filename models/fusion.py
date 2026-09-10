@@ -136,40 +136,6 @@ class ClassifierHead(nn.Module):
         return torch.sigmoid(self.forward(x))
 
 
-class UncertaintyEstimator(nn.Module):
-    """
-    Оценка неопределённости предсказания
-    Через Monte Carlo Dropout или энтропию предсказаний
-    """
-    
-    def __init__(self, n_samples: int = 10):
-        super().__init__()
-        self.n_samples = n_samples
-    
-    def forward(self, classifier: ClassifierHead, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        MC Dropout для оценки uncertainty
-        Возвращает: (mean_prediction, uncertainty)
-        """
-        predictions = []
-        
-        # Включаем dropout для инференса
-        classifier.train()
-        
-        for _ in range(self.n_samples):
-            pred = classifier(x)
-            predictions.append(pred)
-        
-        classifier.eval()
-        
-        # Статистики
-        predictions = torch.cat(predictions, dim=1)  # [B, n_samples]
-        mean_pred = predictions.mean(dim=1, keepdim=True)  # [B, 1]
-        uncertainty = predictions.std(dim=1, keepdim=True)  # [B, 1]
-        
-        return mean_pred, uncertainty
-
-
 # ============================================================
 # Тестирование
 # ============================================================

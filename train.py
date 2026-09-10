@@ -5,12 +5,14 @@ Training loop для NPR AI/Real Detector
 import os
 import time
 import logging
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, LinearLR, SequentialLR
+from typing import Dict
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
@@ -24,6 +26,17 @@ from utils import (
     set_seed, setup_logger, save_checkpoint, load_checkpoint,
     compute_metrics, save_metrics, get_device, AverageMeter
 )
+from performance_monitor import PerformanceMonitor
+
+logger = logging.getLogger(__name__)
+
+
+def _fmt_size(dataset) -> str:
+    """Размер датасета; streaming IterableDataset не имеет len()"""
+    try:
+        return str(len(dataset))
+    except TypeError:
+        return "streaming (бесконечный)"
 
 logger = logging.getLogger(__name__)
 
@@ -39,24 +52,37 @@ class Trainer:
         # Device
         self.device = get_device(config.training.device)
         logger.info(f"Using device: {self.device}")
-        
+
         # Seed
-        set_seed(config.training.seed)
-        
+        set_seed(config.training.seed, deterministic=config.training.reproducible)
+
         # Model
         self.model = create_detector(config.model, device=self.device.type)
         self.model = self.model.to(self.device)
-        
-        # Mixed precision scaler
+
+        # Mixed precision scaler (GradScaler нужен только для float16;
+        # bfloat16 не требует масштабирования градиентов)
+        self.amp_dtype = (
+            torch.bfloat16
+            if getattr(config.training, 'amp_dtype', 'float16') == 'bfloat16'
+            else torch.float16
+        )
         self.use_amp = config.training.use_amp and self.device.type == 'cuda'
-        self.scaler = GradScaler() if self.use_amp else None
+        self.scaler = (
+            GradScaler() if (self.use_amp and self.amp_dtype == torch.float16) else None
+        )
         if self.use_amp:
-            logger.info("✅ Mixed Precision Training (AMP) enabled")
-        
-        # Data (download to disk)
+            logger.info(
+                f"✅ Mixed Precision Training (AMP) enabled, dtype={self.amp_dtype}"
+            )
+
+        # Performance monitor (throughput / VRAM)
+        self.monitor = PerformanceMonitor(log_dir=config.log_dir)
+
+        # Data (локальный кэш или стриминг)
         self.train_dataset, self.val_dataset, self.test_dataset = prepare_datasets(
             config,
-            streaming=config.data.streaming  # False = download to disk
+            streaming=config.data.streaming
         )
         self.train_loader, self.val_loader, self.test_loader = create_dataloaders(
             self.train_dataset,
@@ -194,25 +220,21 @@ class Trainer:
         predictions = []
         targets = []
         
-        # Для IterableDataset len(loader) может быть неточным
-        # Используем len(train_loader) только для tqdm
-        total_batches = len(self.train_loader)
-        
-        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch} [Train]", 
-                    total=total_batches)
+        # Для IterableDataset len(loader) неизвестен — tqdm без total
+        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch} [Train]")
         skipped_batches = 0
-        
+
         for batch_idx, (gray, rgb, labels) in enumerate(pbar):
             # Перенос на устройство
             gray = gray.to(self.device, non_blocking=True)
             rgb = rgb.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
-            
+
             # Forward pass with autocast for mixed precision
-            with autocast(device_type=self.device.type, enabled=self.use_amp):
+            with autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
                 output = self.model(gray, rgb)
-                # Model now returns logits (not probabilities)
-                logits = output['probability'].squeeze()
+                # Model returns logits (not probabilities)
+                logits = output['logits'].squeeze()
 
                 if not torch.isfinite(logits).all():
                     skipped_batches += 1
@@ -290,16 +312,19 @@ class Trainer:
                 'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
             })
         
-        # Вычисление метрик за epoch
+# Вычисление метрик за epoch
         predictions = np.array(predictions)
         targets = np.array(targets)
         metrics = compute_metrics(predictions, targets)
 
+        # Для PerformanceMonitor: сколько train-сэмплов прошло за эпоху
+        self._last_train_samples = loss_meter.count
+
         if skipped_batches > 0:
             self.logger.warning(
-                f"[Train][Epoch {self.current_epoch}] skipped batches: {skipped_batches}/{total_batches}"
+                f"[Train][Epoch {self.current_epoch}] skipped batches: {skipped_batches}"
             )
-        
+
         return {
             'loss': loss_meter.avg,
             'gate_reg': gate_reg_meter.avg,
@@ -328,9 +353,9 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
             
             # Forward pass with autocast
-            with autocast(device_type=self.device.type, enabled=self.use_amp):
+            with autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp):
                 output = self.model(gray, rgb)
-                logits = output['probability'].squeeze()
+                logits = output['logits'].squeeze()
 
                 if not torch.isfinite(logits).all():
                     skipped_batches += 1
@@ -369,7 +394,7 @@ class Trainer:
 
         if skipped_batches > 0:
             self.logger.warning(
-                f"[Val][Epoch {self.current_epoch}] skipped batches: {skipped_batches}/{len(self.val_loader)}"
+                f"[Val][Epoch {self.current_epoch}] skipped batches: {skipped_batches}"
             )
         
         return {
@@ -402,7 +427,7 @@ class Trainer:
             labels = labels.to(self.device)
             
             output = self.model(gray, rgb)
-            logits = output['probability'].squeeze()
+            logits = output['logits'].squeeze()
 
             if not torch.isfinite(logits).all():
                 skipped_batches += 1
@@ -428,7 +453,7 @@ class Trainer:
 
         if skipped_batches > 0:
             self.logger.warning(
-                f"[Test] skipped batches: {skipped_batches}/{len(self.test_loader)}"
+                f"[Test] skipped batches: {skipped_batches}"
             )
         
         # Средние веса gate
@@ -438,30 +463,48 @@ class Trainer:
         
         return metrics
     
+    def _slim_state_dict(self) -> Dict[str, torch.Tensor]:
+        """State dict без замороженных CLIP-весов (~600 МБ → ~2 МБ).
+
+        CLIP-веса восстанавливаются при загрузке из предобученной модели.
+        Если CLIP частично разморожен — сохраняем его целиком.
+        """
+        full = self.model.state_dict()
+        if getattr(self.config.model, 'semantic_unfreeze_last_n_blocks', 0) > 0:
+            return full
+        prefix = 'semantic_branch.clip_extractor.'
+        return {k: v for k, v in full.items() if not k.startswith(prefix)}
+
     def save_checkpoint(self, is_best: bool = False):
-        """Сохранение чекпоинта"""
+        """Сохранение чекпоинта (без замороженных CLIP-весов)"""
         checkpoint = {
             'epoch': self.current_epoch,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': self._slim_state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'best_val_auc': self.best_val_auc,
             'config': self.config
         }
-        
+
         # Текущий checkpoint
         current_path = os.path.join(
             self.config.training.checkpoint_dir,
             f"checkpoint_epoch_{self.current_epoch}.pt"
         )
-        
+
         save_checkpoint(
             checkpoint,
             current_path,
             is_best=is_best,
             best_filepath=self.config.training.best_model_path
         )
-        
+
+        # Ротация: оставляем только последний epoch-чекпоинт (+ best)
+        ckpt_dir = Path(self.config.training.checkpoint_dir)
+        for old in ckpt_dir.glob("checkpoint_epoch_*.pt"):
+            if old.resolve() != Path(current_path).resolve():
+                old.unlink(missing_ok=True)
+
         if is_best:
             self.logger.info(f"✅ Сохранён лучший checkpoint (AUC={self.best_val_auc:.4f})")
     
@@ -510,9 +553,9 @@ class Trainer:
         self.logger.info("=" * 60)
         self.logger.info("НАЧАЛО ОБУЧЕНИЯ")
         self.logger.info("=" * 60)
-        self.logger.info(f"Train samples: {len(self.train_dataset)}") # type: ignore
-        self.logger.info(f"Val samples:   {len(self.val_dataset)}") # type: ignore
-        self.logger.info(f"Test samples:  {len(self.test_dataset)}") # type: ignore
+        self.logger.info(f"Train samples: {_fmt_size(self.train_dataset)}")
+        self.logger.info(f"Val samples:   {_fmt_size(self.val_dataset)}")
+        self.logger.info(f"Test samples:  {_fmt_size(self.test_dataset)}")
         self.logger.info(f"Batch size:    {self.config.training.batch_size}")
         self.logger.info(f"Learning rate: {self.config.training.learning_rate}")
         self.logger.info(f"Epochs:        {self.config.training.epochs}")
@@ -531,16 +574,27 @@ class Trainer:
         
         for epoch in range(self.config.training.epochs):
             self.current_epoch = epoch
-            
+            self.monitor.start_epoch()
+
             # Train
             train_metrics = self.train_epoch()
             self.train_losses.append(train_metrics['loss'])
-            
+
             # Validate
             val_metrics = self.validate()
             self.val_losses.append(val_metrics['loss'])
             self.val_aucs.append(val_metrics['auc'])
             self.val_metrics.append(val_metrics)
+
+            # Throughput / VRAM
+            perf = self.monitor.end_epoch(num_samples=getattr(self, '_last_train_samples', 0))
+            perf_msg = (
+                f"[Perf] Epoch time: {perf['epoch_time_sec']:.1f}s, "
+                f"Throughput: {perf['samples_per_sec']:.1f} samples/s"
+            )
+            if 'peak_memory_mb' in perf:
+                perf_msg += f", Peak VRAM: {perf['peak_memory_mb']:.0f}MB"
+            self.logger.info(perf_msg)
             
             # Логирование
             elapsed = time.time() - start_time
@@ -616,6 +670,18 @@ class Trainer:
         self.logger.info(f"Gate Weights:   {test_metrics['gate_weights']}")
         
         # Сохранение метрик
+        perf_summary = self.monitor.get_summary()
+        if perf_summary:
+            self.logger.info(
+                f"[Perf] Avg epoch time: {perf_summary['avg_epoch_time_sec']:.1f}s, "
+                f"Avg throughput: {perf_summary['avg_throughput']:.1f} samples/s"
+            )
+            if 'avg_peak_memory_mb' in perf_summary:
+                self.logger.info(
+                    f"[Perf] Avg peak VRAM: {perf_summary['avg_peak_memory_mb']:.0f}MB, "
+                    f"Max: {perf_summary['max_peak_memory_mb']:.0f}MB"
+                )
+
         all_metrics = {
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
@@ -624,11 +690,18 @@ class Trainer:
             'test_metrics': test_metrics,
             'total_params': total_params,
             'trainable_params': trainable_params,
-            'training_time': time.time() - start_time
+            'training_time': time.time() - start_time,
+            'performance_summary': perf_summary
         }
-        
+
         metrics_path = os.path.join(self.config.output_dir, 'metrics.json')
         save_metrics(all_metrics, metrics_path)
+
+        # Отчёт по производительности
+        try:
+            self.monitor.save_report()
+        except Exception as e:
+            self.logger.warning(f"Не удалось сохранить performance report: {e}")
         
         # Финальные графики
         try:

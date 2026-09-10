@@ -185,20 +185,22 @@ def run_training(config, log_queue, stop_event):
 
 def build_training_tab():
     """Build the Training Control tab."""
+    default_config = Config()
+
     with gr.Tab("Training Control") as tab:
         gr.Markdown("## Training Configuration")
 
         with gr.Row():
             with gr.Column():
-                learning_rate = gr.Number(label="Learning Rate", value=3e-4)
-                epochs = gr.Number(label="Epochs", value=50, precision=0)
-                batch_size = gr.Number(label="Batch Size", value=512, precision=0)
-                early_stop_patience = gr.Number(label="Early Stop Patience", value=8, precision=0)
+                learning_rate = gr.Number(label="Learning Rate", value=default_config.training.learning_rate)
+                epochs = gr.Number(label="Epochs", value=default_config.training.epochs, precision=0)
+                batch_size = gr.Number(label="Batch Size", value=default_config.training.batch_size, precision=0)
+                early_stop_patience = gr.Number(label="Early Stop Patience", value=default_config.training.early_stop_patience, precision=0)
 
             with gr.Column():
-                optimizer = gr.Dropdown(label="Optimizer", choices=["adamw", "adam", "sgd"], value="adamw")
-                scheduler_type = gr.Dropdown(label="Scheduler Type", choices=["cosine", "plateau"], value="cosine")
-                use_amp = gr.Checkbox(label="Use Mixed Precision (AMP)", value=False)
+                optimizer = gr.Dropdown(label="Optimizer", choices=["adamw", "adam", "sgd"], value=default_config.training.optimizer)
+                scheduler_type = gr.Dropdown(label="Scheduler Type", choices=["cosine", "plateau"], value=default_config.training.scheduler_type)
+                use_amp = gr.Checkbox(label="Use Mixed Precision (AMP)", value=default_config.training.use_amp)
 
         with gr.Row():
             start_btn = gr.Button("Start Training", variant="primary")
@@ -380,7 +382,7 @@ def build_inference_tab():
             model.eval()
             with torch.no_grad():
                 output = model(gray_tensor, rgb_tensor)
-                prob_ai = torch.sigmoid(output['probability']).item()
+                prob_ai = torch.sigmoid(output['logits']).item()
                 pred_class = "AI-Generated" if prob_ai >= threshold else "Real"
                 confidence = abs(prob_ai - 0.5) * 2
 

@@ -9,8 +9,8 @@ import os
 
 from .spatial_branch import SpatialBranch
 from .frequency_branch import FrequencyBranch
-from .semantic_branch import SemanticBranch, SimpleSemanticBranch
-from .fusion import CrossAttentionFusion, AdaptiveGating, ClassifierHead, UncertaintyEstimator
+from .semantic_branch import SemanticBranch
+from .fusion import CrossAttentionFusion, AdaptiveGating, ClassifierHead
 
 
 class NPRDetector(nn.Module):
@@ -58,20 +58,14 @@ class NPRDetector(nn.Module):
             hidden_dims=config.hidden_dims,
             dropout_rate=config.dropout_rate
         )
-        
-        # Uncertainty estimation (опционально)
-        self.use_uncertainty = hasattr(config, 'use_uncertainty') and config.use_uncertainty
-        if self.use_uncertainty:
-            self.uncertainty_estimator = UncertaintyEstimator(n_samples=10)
-    
+
     def forward(self, x_gray: torch.Tensor, x_rgb: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         x_gray: [B, 1, H, W] grayscale изображение (для spatial + freq)
         x_rgb: [B, 3, H', W'] RGB изображение (для semantic)
-        
+
         Возвращает словарь:
-            - 'probability': [B, 1] P(AI)
-            - 'uncertainty': [B, 1] (опционально)
+            - 'logits': [B, 1] raw logits (sigmoid в inference)
             - 'spatial_embedding': [B, spatial_dim]
             - 'frequency_embedding': [B, freq_dim]
             - 'semantic_embedding': [B, semantic_dim]
@@ -82,60 +76,54 @@ class NPRDetector(nn.Module):
         freq_emb = self.frequency_branch(x_gray)
         semantic_out = self.semantic_branch(x_rgb)
         semantic_emb = semantic_out['embedding']
-        
+
         # Конкатенация spatial + frequency
         spatial_freq = torch.cat([spatial_emb, freq_emb], dim=1)
-        
+
         # Cross-Attention fusion
         cross_attn_out = self.cross_attention(semantic_emb, spatial_freq)
-        
+
         # Adaptive gating
         fused, gate_weights = self.adaptive_gating(
-            semantic_emb, 
-            spatial_emb, 
+            semantic_emb,
+            spatial_emb,
             freq_emb
         )
-        
+
         # Комбинация cross-fusion и gating через learnable projection
         final_embedding = self.fusion_proj(torch.cat([cross_attn_out, fused], dim=1))
-        
+
         # Classification
-        probability = self.classifier(final_embedding)
-        
+        logits = self.classifier(final_embedding)
+
         result = {
-            'probability': probability,
+            'logits': logits,
             'spatial_embedding': spatial_emb,
             'frequency_embedding': freq_emb,
             'semantic_embedding': semantic_emb,
             'gate_weights': gate_weights,
             'final_embedding': final_embedding
         }
-        
-        # Uncertainty estimation (опционально)
-        if self.use_uncertainty:
-            mean_pred, uncertainty = self.uncertainty_estimator(self.classifier, final_embedding)
-            result['probability'] = mean_pred  # These are logits; sigmoid applied in inference
-            result['uncertainty'] = uncertainty
-        
+
         return result
     
-    def predict(self, x_gray: torch.Tensor, x_rgb: torch.Tensor, 
+    def predict(self, x_gray: torch.Tensor, x_rgb: torch.Tensor,
                 threshold: float = 0.5) -> Dict[str, any]:
         """
         Инференс с постобработкой
         Model returns logits, sigmoid applied here for probability
         """
         self.eval()
-        
+
         with torch.no_grad():
             output = self(x_gray, x_rgb)
-            
+
             # Apply sigmoid to logits for probability
-            logits = output['probability']
+            logits = output['logits']
             prob_ai = torch.sigmoid(logits).item()
             pred_class = "AI_GENERATED" if prob_ai >= threshold else "REAL"
             confidence = abs(prob_ai - 0.5) * 2  # 0.0 - 1.0
-            
+
             result = {
                 'probability_ai': prob_ai,
                 'probability_real': 1.0 - prob_ai,
@@ -143,18 +131,14 @@ class NPRDetector(nn.Module):
                 'confidence': confidence,
                 'threshold': threshold
             }
-            
-            # Добавляем uncertainty если есть
-            if 'uncertainty' in output:
-                result['uncertainty'] = output['uncertainty'].item()
-            
+
             # Gate weights для интерпретируемости
             result['gate_weights'] = {
                 'semantic': output['gate_weights'][0, 0].item(),
                 'spatial': output['gate_weights'][0, 1].item(),
                 'frequency': output['gate_weights'][0, 2].item()
             }
-            
+
             return result
     
     def count_parameters(self) -> Dict[str, int]:
@@ -223,17 +207,25 @@ class NPRDetectorWithEarlyExit(NPRDetector):
 # Factory функции для удобства
 # ============================================================
 def create_detector(config, device: str = 'gpu', pretrained_path: Optional[str] = None) -> NPRDetector:
-    """Создание детектора с опциональной загрузкой весов"""
-    
+    """Создание детектора с опциональной загрузкой весов
+
+    Чекпоинты могут быть slim (без замороженных CLIP-весов) — ключи
+    semantic_branch.clip_extractor отсутствуют и берутся из предобученной модели.
+    """
+
     model = NPRDetector(config, device=device)
-    
+
     if pretrained_path and os.path.exists(pretrained_path):
         checkpoint = torch.load(pretrained_path, map_location=device, weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"✅ Загружены веса из: {pretrained_path}")
+        missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        if unexpected:
+            print(f"[WARN] Unexpected checkpoint keys ({len(unexpected)}): {unexpected[:5]}")
+        if missing:
+            print(f"[INFO] {len(missing)} keys not in checkpoint (slim) - taken from pretrained CLIP, e.g.: {missing[:3]}")
+        print(f"[OK] Loaded weights from: {pretrained_path}")
         print(f"   Epoch: {checkpoint.get('epoch', 'N/A')}")
         print(f"   Val AUC: {checkpoint.get('val_auc', 'N/A')}")
-    
+
     return model
 
 
@@ -273,7 +265,7 @@ if __name__ == '__main__':
     print("\n=== NPRDetector Test ===")
     print(f"Input (gray): {x_gray.shape}")
     print(f"Input (RGB): {x_rgb.shape}")
-    print(f"Output logits: {output['probability'].shape}")
+    print(f"Output logits: {output['logits'].shape}")
     print(f"Output gate_weights: {output['gate_weights'].shape}")
     
     # Подсчёт параметров

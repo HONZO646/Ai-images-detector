@@ -509,60 +509,6 @@ class SemanticBranch(nn.Module):
 
 
 # ============================================================
-# Альтернативная реализация с torchvision для простоты
-# ============================================================
-class SimpleSemanticBranch(nn.Module):
-    """
-    Упрощённая семантическая ветка без внешних зависимостей
-    Использует torchvision.models для извлечения features
-    """
-    
-    def __init__(self, config, device: str = 'cpu'):
-        super().__init__()
-        
-        # Загрузка pretrained модели (ResNet-18 для скорости)
-        try:
-            from torchvision import models
-        except ImportError:
-            raise ImportError("Установите torchvision: pip install torchvision")
-        
-        # Используем ResNet без classifier
-        resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        
-        # Заморозка всех слоёв
-        for param in resnet.parameters():
-            param.requires_grad = False
-        
-        # Удаляем последний fully connected слой
-        self.backbone = nn.Sequential(*list(resnet.children())[:-1])
-        self.backbone.eval()
-        
-        # ResNet-18 имеет 512-dim features
-        backbone_dim = 512
-        
-        # Projector
-        self.projector = SemanticProjector(
-            input_dim=backbone_dim,
-            output_dim=config.semantic_embedding_dim
-        )
-    
-    def forward(self, x: torch.Tensor) -> dict:
-        """
-        x: [B, 3, H, W] RGB изображение
-        Возвращает: {'embedding': [B, semantic_embedding_dim]}
-        """
-        with torch.no_grad():
-            # ResNet backbone
-            features = self.backbone(x)  # [B, 512, 1, 1]
-            features = features.view(features.shape[0], -1)  # [B, 512]
-        
-        # Projection
-        embedding = self.projector(features)
-        
-        return {'embedding': embedding}
-
-
-# ============================================================
 # Тестирование
 # ============================================================
 if __name__ == '__main__':

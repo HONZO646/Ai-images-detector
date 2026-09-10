@@ -5,7 +5,6 @@ Evaluation модуль для NPR AI/Real Detector
 import os
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 from typing import Dict, List, Tuple, Optional
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -18,7 +17,7 @@ import logging
 
 from config import Config
 from models.detector import NPRDetector, create_detector
-from data.dataset import prepare_datasets, create_dataloaders
+from data.dataset import prepare_datasets, create_eval_loader
 from utils import compute_metrics, get_device
 
 logger = logging.getLogger(__name__)
@@ -37,12 +36,11 @@ class Evaluator:
         self.model = self.model.to(self.device)
         self.model.eval()
         
-        # Data
+        # Data: только test-сплит (train/val пересоздавать не нужно)
         _, _, self.test_dataset = prepare_datasets(config)
-        self.test_loader = DataLoader(
+        self.test_loader = create_eval_loader(
             self.test_dataset,
             batch_size=config.training.batch_size,
-            shuffle=False,
             num_workers=config.training.num_workers,
             pin_memory=config.training.pin_memory
         )
@@ -69,7 +67,7 @@ class Evaluator:
             rgb = rgb.to(self.device)
             
             output = self.model(gray, rgb)
-            logits = output['probability'].squeeze()
+            logits = output['logits'].squeeze()
             # Convert logits to probabilities
             probabilities = torch.sigmoid(logits).cpu().numpy()
             
