@@ -11,8 +11,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import DataLoader
-from typing import Dict, Tuple, Optional
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 

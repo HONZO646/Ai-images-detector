@@ -16,7 +16,7 @@ class DataConfig:
     ai_data_path: str = os.path.join(data_root, "ai_generated")  # HF generated
     
     # Режим загрузки
-    streaming: bool = False  # False = скачивать на диск, True = стриминг из HF
+    streaming: bool = True  # False = скачивать на диск, True = стриминг из HF
     
     # Размеры
     image_size: int = 640
@@ -33,13 +33,13 @@ class DataConfig:
     # HuggingFace Datasets
     # ImageNet-1k: https://huggingface.co/datasets/ILSVRC/imagenet-1k
     hf_imagenet_name: str = "ILSVRC/imagenet-1k"
-    hf_imagenet_split: str = "validation"  # val split для реальных изображений
-    hf_imagenet_max_samples: int = 20000
-    
+    hf_imagenet_split: str = "train"  # val split для реальных изображений
+    real_max_samples: int = 20000
+
     # AI generated dataset
     hf_dataset_name: str = "gasstation/generated-images"
     hf_dataset_split: str = "train"
-    hf_dataset_max_samples: int = 20000  # Сколько AI изображений загружать
+    ai_max_samples: int = 20000  # Сколько AI изображений загружать
 
 
 @dataclass
@@ -107,7 +107,7 @@ class ModelConfig:
 class TrainingConfig:
     """Настройки обучения с оптимизациями производительности"""
     # Основные
-    batch_size: int = 512  # Увеличено с учётом 24GB VRAM
+    batch_size: int = 64  # Увеличено с учётом 24GB VRAM
     epochs: int = 50
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
@@ -153,8 +153,8 @@ class TrainingConfig:
     
     # Reproducibility
     seed: int = 42
-    num_workers: int = 4
-    pin_memory: bool = True  # True для GPU (ускоряет передачу данных)
+    num_workers: int = 2
+    pin_memory: bool = False  # True для GPU (ускоряет передачу данных)
     
     # Performance optimizations
     compile_model: bool = False  # torch.compile (PyTorch 2.0+, может дать +20% скорости)

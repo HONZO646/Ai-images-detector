@@ -9,13 +9,16 @@ from PIL import Image, ImageEnhance, ImageFilter
 import torch
 import torchvision.transforms.functional as TF
 from torchvision.transforms import Compose, GaussianBlur as TVGaussianBlur
-from torch.utils.data import Dataset, DataLoader, Subset, IterableDataset
+from torch.utils.data import Dataset, DataLoader, Subset, IterableDataset, get_worker_info
 from pathlib import Path
 from typing import Tuple, List, Optional, Dict, Callable
 import logging
 
 logger = logging.getLogger(__name__)
 
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "60"
+os.environ["HF_HUB_ETAG_TIMEOUT"] = "120"
+os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
 
 def process_image(img_rgb: Image.Image, transform: Optional[Callable] = None, target_size: int = 256) -> Tuple[torch.Tensor, torch.Tensor]:
     """Process image: apply transform, resize, convert to tensors"""
@@ -175,7 +178,6 @@ class StreamingNPRDataset(IterableDataset):
                  label: int,
                  transform: Optional[callable] = None,
                  target_size: int = 256,
-                 max_samples: int = None,
                  aug_factor: int = 1):
         """
         hf_dataset: HuggingFace dataset в streaming mode
@@ -190,70 +192,35 @@ class StreamingNPRDataset(IterableDataset):
         self.label = label
         self.transform = transform
         self.target_size = target_size
-        self.max_samples = max_samples
         self.aug_factor = aug_factor
         
-        # Определение длины (для информации)
-        if max_samples is not None:
-            self._len = max_samples * aug_factor
-        elif hasattr(hf_dataset, '__len__'):
-            self._len = len(hf_dataset) * aug_factor
-        else:
-            self._len = 10000 * aug_factor  # fallback estimate
-        
-        logger.info(f"Создан Streaming dataset: label={label}, max_samples={self.max_samples}, aug_factor={aug_factor}")
-    
-    def __len__(self) -> int:
-        return self._len
+        print(f"Создан Streaming dataset: label={label}, aug_factor={aug_factor}")
     
     def __iter__(self):
         """Итератор для streaming mode — бесконечный цикл"""
-        # Для IterableDataset с фиксированным max_samples,
-        # мы должны yield'нуть ровно max_samples примеров
-        count = 0
-        max_count = self.max_samples if self.max_samples is not None else float('inf')
-        
-        while count < max_count:
-            # Создаём новый итератор (на случае если предыдущий исчерпался)
-            try:
-                if self.max_samples is not None:
-                    # HF streaming dataset может иметь .shuffle().take()
-                    # Для бесконечности используем shuffle каждый раз
-                    ds = self.hf_dataset.shuffle(seed=random.randint(0, 1_000_000))
-                    it = iter(ds.take(self.max_samples))
-                else:
-                    it = iter(self.hf_dataset)
-            except Exception:
-                # Fallback: пробуем снова с оригинальным dataset
-                it = iter(self.hf_dataset)
+        worker_info = get_worker_info()
+        ds = self.hf_dataset
+
+        if worker_info is not None:
+            ds = ds.shard(
+                num_shards=worker_info.num_workers,
+                index=worker_info.id,
+            )
             
-            for idx, item in enumerate(it):
-                if count >= max_count:
-                    break
-                
-                # Для multiple workers распределяем данные
-                worker_info = torch.utils.data.get_worker_info()
-                if worker_info is not None:
-                    if idx % worker_info.num_workers != worker_info.id:
-                        continue
-                
-                try:
-                    img_rgb = item['image'].convert('RGB')
-                except Exception as e:
-                    logger.error(f"Ошибка загрузки изображения: {e}")
-                    img_rgb = Image.new('RGB', (self.target_size, self.target_size), (0, 0, 0))
-                
-                # Выдаём несколько аугментированных версий одного семпла
-                for _ in range(self.aug_factor):
-                    gray_tensor, rgb_tensor = process_image(img_rgb, self.transform, self.target_size)
-                    
-                    label_tensor = torch.tensor(self.label, dtype=torch.float32)
-                    
-                    yield gray_tensor, rgb_tensor, label_tensor
-                    count += 1
-                    
-                    if count >= max_count:
-                        break
+        for item in ds:
+            try:
+                img_rgb = item["image"].convert("RGB")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки изображения: {e}")
+                img_rgb = Image.new("RGB", (self.target_size, self.target_size), (0, 0, 0))
+
+            label_tensor = torch.tensor(self.label, dtype=torch.float32)
+
+            for _ in range(self.aug_factor):
+                gray_tensor, rgb_tensor = process_image(
+                    img_rgb, self.transform, self.target_size
+                )
+                yield gray_tensor, rgb_tensor, label_tensor
     
     def _rgb_to_grayscale_tensor(self, img: Image.Image) -> torch.Tensor:
         """RGB PIL Image → [1, H, W] grayscale tensor"""
@@ -270,54 +237,24 @@ class CombinedStreamingDataset(IterableDataset):
     Чередуёт real и ai примеры для баланса
     """
     
-    def __init__(self,
-                 real_dataset: StreamingNPRDataset,
-                 ai_dataset: StreamingNPRDataset):
+    def __init__(self, real_dataset, ai_dataset):
         super().__init__()
         self.real_ds = real_dataset
         self.ai_ds = ai_dataset
-        
-        # Балансировка по меньшему классу
-        self.n_per_class = min(len(real_dataset), len(ai_dataset))
-        self.total_len = self.n_per_class * 2
-        
-        logger.info(f"Combined Streaming Dataset:")
-        logger.info(f"  Real: {len(real_dataset)}")
-        logger.info(f"  AI:   {len(ai_dataset)}")
-        logger.info(f"  Per class: {self.n_per_class}")
-        logger.info(f"  Total: {self.total_len}")
-    
-    def __len__(self) -> int:
-        return self.total_len
-    
+
     def __iter__(self):
-        """Чередование real и ai примеров — бесконечный цикл"""
         real_iter = iter(self.real_ds)
         ai_iter = iter(self.ai_ds)
-        
-        for i in range(self.n_per_class):
+
+        while True:
             try:
-                # Real пример
                 yield next(real_iter)
-            except StopIteration:
-                # Пересоздаём итератор (бесконечный streaming)
-                real_iter = iter(self.real_ds)
-                try:
-                    yield next(real_iter)
-                except StopIteration:
-                    break  # Если и это не сработало — выходим
-            
-            try:
-                # AI пример
                 yield next(ai_iter)
             except StopIteration:
-                # Пересоздаём итератор
-                ai_iter = iter(self.ai_ds)
-                try:
-                    yield next(ai_iter)
-                except StopIteration:
-                    break
+                break
 
+def filter_is_synthetic(item):
+    return item.get("media_type", None) == "synthetic"
 
 def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
     """
@@ -328,47 +265,43 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
     except ImportError:
         raise ImportError("Установите datasets: pip install datasets")
     
-    logger.info("=" * 60)
-    logger.info("ЗАГРУЗКА ДАННЫХ В STREAMING MODE")
-    logger.info("Данные НЕ загружаются на диск!")
-    logger.info("=" * 60)
+    print("ЗАГРУЗКА ДАННЫХ В STREAMING MODE")
     
     # ImageNet-1k (real)
-    logger.info(f"\n📥 ImageNet-1k (split={config.data.hf_imagenet_split})...")
-    imagenet_full = load_dataset(
+    print(f"\n📥 ImageNet-1k (split={config.data.hf_imagenet_split})...")
+    real_full_ds = load_dataset(
         "ILSVRC/imagenet-1k",
         split=config.data.hf_imagenet_split,
         streaming=True  # ← STREAMING MODE
     )
     
     # AI generated (оставляем только fully synthetic, исключая semisynthetic)
-    logger.info(f"📥 AI dataset: {config.data.hf_dataset_name}...")
-    ai_full = load_dataset(
+    print(f"📥 AI dataset: {config.data.hf_dataset_name}...")
+    ai_full_ds = load_dataset(
         config.data.hf_dataset_name,
         split=config.data.hf_dataset_split,
         streaming=True
     )
-    ai_full = ai_full.filter(lambda item: item.get('media_type', None) == 'synthetic')
-    logger.info("✅ AI streaming dataset отфильтрован: media_type == 'synthetic'")
-    
-    # Разделение на train/val/test для каждого источника
-    def split_streaming_dataset(dataset, train_ratio=0.75, val_ratio=0.15):
-        """Разделение streaming dataset через shuffle + take"""
-        # Для streaming используем shuffled().take()
-        # Это не идеально, но работает без загрузки
-        dataset_shuffled = dataset.shuffle(seed=config.training.seed)
+    ai_full_ds = ai_full_ds.filter(filter_is_synthetic)
+    print("✅ AI streaming dataset отфильтрован: media_type == 'synthetic'")
+
+    real_full_ds = real_full_ds.shuffle(seed=config.training.seed, buffer_size=1000)
+    ai_full_ds = ai_full_ds.shuffle(seed=config.training.seed, buffer_size=1000)
+
+    train_size = int(config.data.real_max_samples * config.data.train_ratio)
+    val_size = int(config.data.real_max_samples * config.data.val_ratio)
+
+    print(f"Train size: {train_size}")
+    print(f"Val size: {val_size}")
+
+    real_train_ds = real_full_ds.take(train_size)
+    real_val_ds = real_full_ds.skip(train_size).take(val_size)
+    real_test_ds = real_full_ds.skip(train_size + val_size)
+
+    ai_train_ds = ai_full_ds.take(train_size)
+    ai_val_ds = ai_full_ds.skip(train_size).take(val_size)
+    ai_test_ds = ai_full_ds.skip(train_size + val_size)
         
-        # Определяем размеры
-        # Для streaming берём оценку из config
-        max_real = config.data.hf_imagenet_max_samples
-        max_ai = config.data.hf_dataset_max_samples
-        
-        n_total = min(max_real, max_ai) * 2  # approximate
-        n_train = int(n_total * train_ratio)
-        n_val = int(n_total * val_ratio)
-        
-        return dataset_shuffled, n_train, n_val
-    
     # Создание streaming wrapper'ов с применением аугментаций к обоим датасетам
     train_transform = create_augmentation_pipeline(
         enable=config.augmentation.enable,
@@ -378,69 +311,64 @@ def create_streaming_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
         blur_prob=config.augmentation.blur_prob
     )
     
-    real_train = StreamingNPRDataset(
-        hf_dataset=imagenet_full,
+    real_train_stream = StreamingNPRDataset(
+        hf_dataset=real_train_ds,
         label=0,
         transform=train_transform,
         target_size=config.data.image_size,
-        max_samples=config.data.hf_imagenet_max_samples
     )
     
-    ai_train = StreamingNPRDataset(
-        hf_dataset=ai_full,
+    ai_train_stream = StreamingNPRDataset(
+        hf_dataset=ai_train_ds,
         label=1,
         transform=train_transform,
         target_size=config.data.image_size,
-        max_samples=config.data.hf_dataset_max_samples
     )
     
     # Комбинированный dataset
-    train_dataset = CombinedStreamingDataset(real_train, ai_train)
+    print('---Combined Train dataset---')
+    train_dataset = CombinedStreamingDataset(real_train_stream, ai_train_stream)
 
     # Валидация/тест: формируем сбалансированные наборы из обоих классов
-    val_real = StreamingNPRDataset(
-        hf_dataset=imagenet_full,
+    val_real_stream = StreamingNPRDataset(
+        hf_dataset=real_val_ds,
         label=0,
         transform=None,
         target_size=config.data.image_size,
-        max_samples=int(config.data.hf_imagenet_max_samples * config.data.val_ratio)
     )
 
-    val_ai = StreamingNPRDataset(
-        hf_dataset=ai_full,
+    val_ai_stream = StreamingNPRDataset(
+        hf_dataset=ai_val_ds,
         label=1,
         transform=None,
         target_size=config.data.image_size,
-        max_samples=int(config.data.hf_dataset_max_samples * config.data.val_ratio)
     )
 
-    test_real = StreamingNPRDataset(
-        hf_dataset=imagenet_full,
+    test_real_stream = StreamingNPRDataset(
+        hf_dataset=real_test_ds,
         label=0,
         transform=None,
         target_size=config.data.image_size,
-        max_samples=int(config.data.hf_imagenet_max_samples * config.data.test_ratio)
     )
 
-    test_ai = StreamingNPRDataset(
-        hf_dataset=ai_full,
+    test_ai_stream = StreamingNPRDataset(
+        hf_dataset=ai_test_ds,
         label=1,
         transform=None,
         target_size=config.data.image_size,
-        max_samples=int(config.data.hf_dataset_max_samples * config.data.test_ratio)
     )
 
-    val_dataset = CombinedStreamingDataset(val_real, val_ai)
-    test_dataset = CombinedStreamingDataset(test_real, test_ai)
+    val_dataset = CombinedStreamingDataset(val_real_stream, val_ai_stream)
+    test_dataset = CombinedStreamingDataset(test_real_stream, test_ai_stream)
     
     return train_dataset, val_dataset, test_dataset
 
 
 def download_hf_images(dataset_name: str,
-                       split: str,
                        output_dir: str,
                        prefix: str,
-                       max_samples: int = None,
+                       max_samples: int = 20000,
+                       streaming = False,
                        filter_fn: Callable = None) -> List[str]:
     """
     Универсальная функция для загрузки изображений из HuggingFace dataset
@@ -461,10 +389,10 @@ def download_hf_images(dataset_name: str,
     except ImportError:
         raise ImportError("Установите datasets: pip install datasets")
     
-    logger.info(f"Загрузка {dataset_name} (split={split}, max_samples={max_samples})...")
+    logger.info(f"Загрузка {dataset_name} (max_samples={max_samples})...")
     
     # Потоковая загрузка
-    ds = load_dataset(dataset_name, split=split, streaming=True)
+    ds = load_dataset(dataset_name, streaming=streaming)
     
     # Применение фильтра если задан
     if filter_fn is not None:
@@ -511,7 +439,7 @@ def download_hf_images(dataset_name: str,
     return image_paths
 
 
-def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, Dataset]:
+def prepare_datasets(config) -> Tuple[Dataset, Dataset, Dataset]:
     """
     Подготовка train/val/test split'ов
     
@@ -522,8 +450,10 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     Returns:
         (train_dataset, val_dataset, test_dataset)
     """
+    streaming = config.data.streaming
+
     if streaming:
-        logger.info("🚀 Используем STREAMING mode — данные НЕ загружаются на диск")
+        print("STREAMING mode active")
         return create_streaming_datasets(config)
     
     # Старое поведение (сохранение на диск)
@@ -537,7 +467,7 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
         real_existing = list(real_dir.glob("*.jpg"))
         ai_existing = list(ai_dir.glob("*.jpg"))
         
-        if len(real_existing) > 0 and len(ai_existing) > 0:
+        if len(real_existing) >= config.data.hf_imagenet_max_samples and len(ai_existing) >= config.data.hf_dataset_max_samples:
             logger.info("✅ Найдены существующие данные на диске:")
             logger.info(f"   Real: {len(real_existing)} изображений")
             logger.info(f"   AI:   {len(ai_existing)} изображений")
@@ -555,18 +485,15 @@ def prepare_datasets(config, streaming: bool = True) -> Tuple[Dataset, Dataset, 
     if not real_paths:
         real_paths = download_hf_images(
             dataset_name="ILSVRC/imagenet-1k",
-            split=config.data.hf_imagenet_split,
             output_dir=config.data.real_data_path,
             prefix="real",
-            max_samples=config.data.hf_imagenet_max_samples,
-            filter_fn=None
+            max_samples=config.data.hf_imagenet_max_samples
         )
 
     # Загрузка AI-сгенерированных изображений если нужно
     if not ai_paths:
         ai_paths = download_hf_images(
             dataset_name=config.data.hf_dataset_name,
-            split=config.data.hf_dataset_split,
             output_dir=config.data.ai_data_path,
             prefix="ai",
             max_samples=config.data.hf_dataset_max_samples,
@@ -633,7 +560,7 @@ def worker_init_fn(worker_id: int):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-
+# TODO: Добить шардирование до рабочего
 def create_dataloaders(train_dataset: Dataset,
                        val_dataset: Dataset,
                        test_dataset: Dataset,
@@ -708,29 +635,11 @@ def create_dataloaders(train_dataset: Dataset,
 # ============================================================
 if __name__ == '__main__':
     import sys
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    
-    # Тест аугментаций
-    img = Image.new('RGB', (256, 256), (128, 128, 128))
-    
-    pipeline = create_augmentation_pipeline(enable=True)
-    augmented = pipeline(img)
-    
-    print("=== Augmentation Test ===")
-    print(f"Original: {img.size}")
-    print(f"Augmented: {augmented.size}")
-    
-    # Тест Dataset
-    # Создадим фейковые данные
-    fake_paths = ["test-ai-1.jpg"] * 10 + ["test-real-1.jpg"] * 10
-    fake_labels = [1] * 10 + [0] * 10
-    
-    dataset = NPRDataset(fake_paths, fake_labels, target_size=256)
-    
-    print(f"\n=== Dataset Test ===")
-    print(f"Dataset size: {len(dataset)}")
-    
-    gray, rgb, label = dataset[0]
-    print(f"Gray shape: {gray.shape}")
-    print(f"RGB shape: {rgb.shape}")
-    print(f"Label: {label}")
+    from .. import config
+    config = config.Config()
+    train_dataset, val_dataset, test_dataset = prepare_datasets(
+            config,
+            streaming=config.data.streaming  # False = download to disk
+        )
+
+    print(train_dataset, val_dataset, test_dataset)
