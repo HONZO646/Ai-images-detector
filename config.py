@@ -89,8 +89,9 @@ class ModelConfig:
     # Semantic Branch
     semantic_embedding_dim: int = 128
     semantic_model_name: str = 'clip-ViT-B-32'
-    freeze_semantic: bool = True
-    semantic_unfreeze_last_n_blocks: int = 0  # 0 = полная заморозка, 1-2 = разморозка последних блоков
+    # 0 = полная заморозка CLIP; 1-2 = разморозка последних блоков
+    # (обучаемые CLIP-параметры получают training.semantic_lr)
+    semantic_unfreeze_last_n_blocks: int = 0
     
     # Fusion
     fusion_embedding_dim: int = 128
@@ -111,6 +112,8 @@ class TrainingConfig:
     epochs: int = 50
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
+    # LR для обучаемых CLIP-блоков при semantic_unfreeze_last_n_blocks > 0
+    semantic_lr: float = 1e-6
 
     # Optimizer
     optimizer: str = 'adamw'  # adamw, adam, sgd

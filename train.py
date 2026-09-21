@@ -122,26 +122,59 @@ class Trainer:
         self.val_losses = []
         self.val_aucs = []
     
+    def _build_param_groups(self) -> list:
+        """Параметр-группы оптимизатора.
+
+        При частичной разморозке CLIP (semantic_unfreeze_last_n_blocks > 0)
+        обучаемые CLIP-параметры выделяются в отдельную группу с пониженным
+        LR (semantic_lr), иначе предобученные признаки CLIP разрушатся
+        базовым learning_rate. Без разморозки — одна группа как раньше.
+        """
+        trainable = [p for p in self.model.parameters() if p.requires_grad]
+
+        if getattr(self.config.model, 'semantic_unfreeze_last_n_blocks', 0) <= 0:
+            return [{'params': trainable}]
+
+        clip_ids = {
+            id(p)
+            for p in self.model.semantic_branch.clip_extractor.get_trainable_clip_params()
+        }
+        clip_group = [p for p in trainable if id(p) in clip_ids]
+        other_group = [p for p in trainable if id(p) not in clip_ids]
+
+        semantic_lr = getattr(self.config.training, 'semantic_lr', 1e-6)
+        logger.info(
+            f"Оптимизатор: CLIP-группа ({sum(p.numel() for p in clip_group):,} параметров) "
+            f"@ lr={semantic_lr:g}; остальное "
+            f"({sum(p.numel() for p in other_group):,} параметров) "
+            f"@ lr={self.config.training.learning_rate:g}"
+        )
+        return [
+            {'params': other_group, 'lr': self.config.training.learning_rate},
+            {'params': clip_group, 'lr': semantic_lr},
+        ]
+
     def _create_optimizer(self) -> optim.Optimizer:
         """Создание оптимизатора"""
-        params = filter(lambda p: p.requires_grad, self.model.parameters())
-        
+        param_groups = self._build_param_groups()
+        base_lr = self.config.training.learning_rate
+
         if self.config.training.optimizer == 'adamw':
             return optim.AdamW(
-                params,
-                lr=self.config.training.learning_rate,
+                param_groups,
+                lr=base_lr,
                 weight_decay=self.config.training.weight_decay
             )
         elif self.config.training.optimizer == 'adam':
             return optim.Adam(
-                params,
-                lr=self.config.training.learning_rate,
+                param_groups,
+                lr=base_lr,
                 weight_decay=self.config.training.weight_decay
             )
         elif self.config.training.optimizer == 'sgd':
             return optim.SGD(
-                params,
-                lr=self.config.training.learning_rate,
+                param_groups,
+                lr=base_lr,
                 momentum=0.9,
                 weight_decay=self.config.training.weight_decay
             )

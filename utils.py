@@ -8,7 +8,7 @@ import logging
 import numpy as np
 import torch
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import json
 
 
@@ -98,6 +98,76 @@ def load_checkpoint(
 def count_parameters(model: torch.nn.Module) -> int:
     """Подсчёт количества обучаемых параметров"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def find_f1_optimal_threshold(
+    predictions: np.ndarray,
+    targets: np.ndarray
+) -> Tuple[float, float]:
+    """Порог, максимизирующий F1, и сам максимальный F1.
+
+    Args:
+        predictions: вероятности P(AI) в [0, 1]
+        targets: бинарные метки {0, 1}
+
+    Returns:
+        (threshold, best_f1); при вырожденных входах — (0.5, 0.0)
+    """
+    from sklearn.metrics import precision_recall_curve, f1_score
+
+    predictions = np.asarray(predictions).reshape(-1)
+    targets = np.asarray(targets).reshape(-1)
+
+    if predictions.size == 0 or len(np.unique(targets)) < 2:
+        return 0.5, 0.0
+
+    precision, recall, thresholds = precision_recall_curve(targets, predictions)
+    # precision/recall длиннее thresholds на 1 (последняя точка без порога)
+    f1 = 2 * precision * recall / np.clip(precision + recall, 1e-12, None)
+    idx = int(np.argmax(f1[:-1]))
+    threshold = float(np.clip(thresholds[idx], 0.0, 1.0))
+    best_f1 = float(f1[idx])
+    return threshold, best_f1
+
+
+def expected_calibration_error(
+    predictions: np.ndarray,
+    targets: np.ndarray,
+    n_bins: int = 15
+) -> float:
+    """Expected Calibration Error: взвешенная |accuracy - confidence| по бинам.
+
+    predictions — вероятности P(AI), targets — бинарные метки.
+    """
+    predictions = np.asarray(predictions).reshape(-1)
+    targets = np.asarray(targets).reshape(-1)
+    finite_mask = np.isfinite(predictions) & np.isfinite(targets)
+    predictions = np.clip(predictions[finite_mask], 0.0, 1.0)
+    targets = targets[finite_mask]
+    if predictions.size == 0:
+        return 0.0
+
+    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_ids = np.digitize(predictions, bin_edges[1:-1], right=False)
+    ece = 0.0
+    for b in range(n_bins):
+        mask = bin_ids == b
+        if not mask.any():
+            continue
+        conf = predictions[mask].mean()
+        acc = targets[mask].mean()
+        ece += mask.mean() * abs(acc - conf)
+    return float(ece)
+
+
+def brier_score(predictions: np.ndarray, targets: np.ndarray) -> float:
+    """Brier score: mean((p - y)^2), 0 = идеальная калибровка."""
+    predictions = np.asarray(predictions).reshape(-1)
+    targets = np.asarray(targets).reshape(-1)
+    finite_mask = np.isfinite(predictions) & np.isfinite(targets)
+    if not finite_mask.any():
+        return 0.0
+    return float(np.mean((predictions[finite_mask] - targets[finite_mask]) ** 2))
 
 
 def compute_metrics(

@@ -199,6 +199,21 @@ AMP = bfloat16 (на CPU автоматически отключается)
 python evaluate.py --checkpoint checkpoints/best_model.pt
 ```
 
+Порог классификации калибруется по F1-max на **val**-сплите и сохраняется в
+`outputs/threshold.json`; метрики test считаются с этим порогом. Флаг
+`--no-calibrate` возвращает фиксированный порог 0.5. Дополнительно к метрикам
+считаются ECE (калибровка вероятностей) и Brier score.
+
+### Ablation (вклад веток)
+
+```bash
+python ablation.py --checkpoint checkpoints/best_model.pt
+```
+
+Линейные пробы (StandardScaler + LogisticRegression) поверх эмбеддингов
+spatial / frequency / semantic / их комбинаций / final fusion. Пробы обучаются
+на val, оцениваются на test → `outputs/ablation.csv` + `ablation.md`.
+
 ### Генерируемые графики
 
 - ROC кривая
@@ -225,15 +240,17 @@ python evaluate.py --checkpoint checkpoints/best_model.pt
 project_root/
 ├── config.py                 # Все гиперпараметры в dataclass
 ├── train.py                  # Полный цикл обучения (+ --ui для веб-интерфейса)
-├── evaluate.py               # Метрики + графики
+├── evaluate.py               # Метрики + калибровка порога на val + графики
+├── ablation.py               # Вклад веток: пробы на эмбеддингах
 ├── inference.py              # Инференс (single/batch/dir/cascade)
 ├── gradio_ui.py              # Веб-интерфейс (0.0.0.0:7860)
 ├── performance_monitor.py    # Throughput/VRAM мониторинг (подключён в Trainer)
 ├── test_dataset.py           # Визуализация одного батча датасета
-├── utils.py                  # Logger, checkpoint, metrics
+├── utils.py                  # Logger, checkpoint, metrics, ECE/Brier
 ├── requirements.txt          # Зависимости
 ├── README.md                 # Документация
 ├── AGENTS.md                 # Инструкция для AI-агентов (English)
+├── ROADMAP.md                # План доработок и 4090-экспериментов
 │
 ├── data/
 │   ├── __init__.py
