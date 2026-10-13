@@ -26,7 +26,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def count_existing(directory: Path) -> int:
+def count_existing(directory) -> int:
+    directory = Path(directory)
     if not directory.exists():
         return 0
     return len(list(directory.glob("*.jpg")))

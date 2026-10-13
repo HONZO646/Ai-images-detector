@@ -253,11 +253,12 @@ if __name__ == '__main__':
     config = Config()
     
     # Создание модели
-    model = NPRDetector(config.model)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = NPRDetector(config.model, device=device).to(device)
     
     # Тестовые входы
-    x_gray = torch.randn(2, 1, 256, 256)
-    x_rgb = torch.randn(2, 3, 224, 224)
+    x_gray = torch.randn(2, 1, 256, 256, device=device)
+    x_rgb = torch.randn(2, 3, 224, 224, device=device)
     
     # Прямой проход
     output = model(x_gray, x_rgb)
@@ -275,7 +276,7 @@ if __name__ == '__main__':
         print(f"  {name}: {counts['trainable']:,} trainable / {counts['total']:,} total")
     
     # Тест predict
-    result = model.predict(x_gray, x_rgb)
+    result = model.predict(x_gray[:1], x_rgb[:1])  # predict() — single-image API
     print(f"\n=== Prediction ===")
     for key, value in result.items():
         if isinstance(value, dict):

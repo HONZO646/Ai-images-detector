@@ -334,7 +334,7 @@ class Trainer:
             loss_meter.update(loss.item(), gray.shape[0])
             gate_reg_meter.update(gate_reg.item(), gray.shape[0])
             gate_sem_meter.update(gate_weights[:, 0].mean().item(), gray.shape[0])
-            predictions.extend(probabilities.detach().cpu().numpy())
+            predictions.extend(probabilities.detach().float().cpu().numpy())
             targets.extend(labels.detach().cpu().numpy())
             
             # Progress bar
@@ -412,7 +412,7 @@ class Trainer:
             
             loss_meter.update(loss.item(), gray.shape[0])
             gate_sem_meter.update(output['gate_weights'][:, 0].mean().item(), gray.shape[0])
-            predictions.extend(probabilities.cpu().numpy())
+            predictions.extend(probabilities.float().cpu().numpy())
             targets.extend(labels.cpu().numpy())
             
             pbar.set_postfix({
@@ -470,11 +470,11 @@ class Trainer:
             # Convert logits to probabilities for metrics
             probabilities = torch.sigmoid(logits)
             
-            predictions.extend(probabilities.cpu().numpy())
+            predictions.extend(probabilities.float().cpu().numpy())
             targets.extend(labels.cpu().numpy())
             
             if 'gate_weights' in output:
-                gates = output['gate_weights'].cpu().numpy()
+                gates = output['gate_weights'].float().cpu().numpy()
                 gate_weights['semantic'].extend(gates[:, 0].tolist())
                 gate_weights['spatial'].extend(gates[:, 1].tolist())
                 gate_weights['frequency'].extend(gates[:, 2].tolist())

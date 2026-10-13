@@ -38,6 +38,10 @@ NPR-based AI-generated image detector (PyTorch, single flat Python project). Thr
 - AMP: `use_amp=True` + `amp_dtype='bfloat16'` by default; auto-disabled on CPU; GradScaler only for float16. `pin_memory` auto-off without CUDA. `reproducible=True` in config enables cudnn.deterministic (slower).
 - `models/`, `outputs/`, `checkpoints/`, `logs/`, `data/real/`, `data/ai_generated/` are gitignored — new files under `models/` need `git add -f`. Epoch checkpoints rotate (only latest kept + best).
 - CLIP loads from local `models/clip-ViT-B-32` if present (it is here), else downloads `clip-ViT-B-32` and saves there. Only tokenizer/config files are git-tracked, weights are not.
+- Windows GPU setup: install CUDA torch (`pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128`) BEFORE `pip install -r requirements.txt` (requirements pulls CPU torch from PyPI otherwise). Needs VC++ 2015–2022 x64 ≥14.44 (else `WinError 1114` on `c10.dll`). Set `PYTHONUTF8=1` — printing non-ASCII to redirected stdout crashes otherwise.
+- bf16 AMP: autocast outputs are `bfloat16` — call `.float()` before `.numpy()` (metric loops in `train.py`). CPU runs have AMP off, so this bug only shows on GPU.
+- `NPRDetector.predict()` is a single-image API (`.item()`, `gate_weights[0]`); pass one sample, use `forward()` for batches.
+- Cache trap: `prepare_local_datasets` re-downloads from HF (no blank filter) whenever a class has fewer `.jpg` than `config.data.*_max_samples`. Never delete cache files without a re-download or a config change; `data/ai_generated` has 18 all-black placeholder frames (ROADMAP D0.8).
 - Development happens on `dev`; `main` receives merge PRs (see `git log`).
 
 ## Data pipeline notes
