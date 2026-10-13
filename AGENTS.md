@@ -11,13 +11,20 @@ NPR-based AI-generated image detector (PyTorch, single flat Python project). Thr
 - Inference: `python inference.py --checkpoint checkpoints/best_model.pt --image <path>` (also `--batch`, `--dir`; `--cascade` is experimental/uncalibrated; `--export-onnx` is disabled — FFT has no ONNX ops).
 - Evaluation: `python evaluate.py --checkpoint checkpoints/best_model.pt` — calibrates F1-max threshold on val (saved to `outputs/threshold.json`, `--no-calibrate` keeps 0.5) and reports ECE/Brier.
 - Ablation: `python ablation.py --checkpoint ...` — logistic probes on branch embeddings (fit on val, eval on test) → `outputs/ablation.{csv,md}`.
-- Roadmap: `ROADMAP.md` — improvement plan (this session + RTX 4090 experiment phases).
-- No pytest/lint/typecheck config. Verify with module smoke tests (`python -m models.fusion`, `python -m models.detector`) or `python -m py_compile <file>`; `python test_dataset.py` visualizes one train batch.
+- Roadmap: `ROADMAP.md` — living improvement plan; see «Roadmap as long-term memory» below.
+- No pytest/lint/typecheck config. Verify with module smoke tests (`python -m models.fusion`, `python -m models.detector`), `python -m py_compile <file>`, or a full CPU sanity run: `python scripts/smoke_train.py --epochs 2` (uses local cache size as-is, no HF download, workers off); `python test_dataset.py` visualizes one train batch.
 
 ## Session logging (mandatory)
 - After every user request that changes anything in the project, append one entry to `changes.log` (repo root): `<YYYY-MM-DD HH:mm> | <короткий запрос> | <краткая выжимка изменений>`. Write in Russian, keep it compact.
 - Get the timestamp fresh at write time (`Get-Date -Format "yyyy-MM-dd HH:mm"`), do not guess it.
 - `changes.log` is gitignored via the `*.log` rule — do not commit it unless asked.
+
+## Roadmap as long-term memory (mandatory)
+- `ROADMAP.md` (repo root) is this project's persistent long-term memory. Always read it at session start and keep it continuously up to date — do not rely on chat memory.
+- New plans and future work (agreed with the user) go into `ROADMAP.md` immediately: phase (A/B/C…), task, target files, and a short rationale.
+- As soon as work is done (and verified), mark it in `ROADMAP.md` (`✅` + date); never leave finished items unchecked. Move superseded/cancelled ideas to the backlog section with a note instead of silently deleting context.
+- Decisions made during discussion (approach choices, e.g. probes vs retraining) are recorded in the roadmap entry so future sessions don't re-litigate them.
+- Unfinished work carries over between sessions via `ROADMAP.md`: each session resumes from the first pending item unless the user says otherwise.
 
 ## Non-obvious facts
 - Detector output key is `output['logits']` — **raw logits**, not a probability. Apply `torch.sigmoid` before thresholding/metrics. Same for `classifier(...)` / spatial-branch cascade outputs. (Was renamed from `probability`.)
