@@ -190,6 +190,42 @@ class Sharpen:
         return ImageEnhance.Sharpness(img).enhance(factor)
 
 
+class GaussianNoise:
+    """Аугментация: гауссов шум (inpainted++ в B-Free). std — в уровнях 0–255."""
+
+    def __init__(self, std_range: Tuple[float, float] = (2.0, 8.0), prob: float = 0.3):
+        self.std_range = std_range
+        self.prob = prob
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.prob:
+            return img
+        std = random.uniform(*self.std_range)
+        arr = np.asarray(img, dtype=np.float32)
+        arr = arr + np.random.normal(0.0, std, arr.shape).astype(np.float32)
+        return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+
+class CutOut:
+    """Аугментация: cut-out — серый прямоугольник случайного размера (inpainted++ в B-Free)."""
+
+    def __init__(self, size_range: Tuple[float, float] = (0.1, 0.3), prob: float = 0.2):
+        self.size_range = size_range
+        self.prob = prob
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        if random.random() > self.prob:
+            return img
+        w, h = img.size
+        f = random.uniform(*self.size_range)
+        cw, ch = max(1, int(w * f)), max(1, int(h * f))
+        x0 = random.randint(0, max(0, w - cw))
+        y0 = random.randint(0, max(0, h - ch))
+        arr = np.array(img)
+        arr[y0:y0 + ch, x0:x0 + cw] = 128
+        return Image.fromarray(arr)
+
+
 def create_augmentation_pipeline(aug) -> Optional[Compose]:
     """Реалистичный pipeline аугментаций из AugmentationConfig (config.py)"""
     if not getattr(aug, 'enable', True):
@@ -206,6 +242,8 @@ def create_augmentation_pipeline(aug) -> Optional[Compose]:
         ),
         ProbabilisticGaussianBlur(prob=aug.blur_prob),
         CascadeJpegCompression(quality_range=aug.jpeg_quality_range, prob=aug.jpeg_prob),
+        GaussianNoise(std_range=aug.noise_std_range, prob=aug.noise_prob),
+        CutOut(size_range=aug.cutout_size_range, prob=aug.cutout_prob),
     ]
     return Compose(transforms)
 
@@ -496,6 +534,11 @@ def prepare_datasets(config, streaming: Optional[bool] = None) -> Tuple[Dataset,
     Returns:
         (train_dataset, val_dataset, test_dataset)
     """
+    if getattr(config.data, 'source', 'local') == 'bfree':
+        from data.bfree import prepare_bfree_datasets  # отложенный импорт: избегаем циклической зависимости
+        logger.info("📦 Источник: B-Free (выровненные пары COCO / SD 2.1)")
+        return prepare_bfree_datasets(config)
+
     if streaming is None:
         streaming = config.data.streaming
 

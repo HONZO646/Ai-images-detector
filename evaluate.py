@@ -144,7 +144,7 @@ class Evaluator:
         self.predictions, self.targets, self.gate_weights = self._collect(self.test_loader)
         
         # Compute metrics
-        metrics = compute_metrics(self.predictions, self.targets)
+        metrics = compute_metrics(self.predictions, self.targets, threshold=threshold)
         
         # Additional metrics
         metrics['average_precision'] = average_precision_score(self.targets, self.predictions)

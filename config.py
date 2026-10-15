@@ -40,6 +40,18 @@ class DataConfig:
     hf_dataset_split: str = "train"
     ai_max_samples: int = 20000  # Сколько AI изображений загружать
 
+    # Источник обучающих данных
+    # 'bfree' = выровненные пары GRIP-UNINA B-Free (COCO real vs SD 2.1 self-conditioned, пары по id;
+    #           лицензия только для информационных и некоммерческих целей)
+    # 'local' = локальный кэш ImageNet/gasstation (шорткаты по содержанию и геометрии, ROADMAP E5–E6)
+    source: str = 'bfree'
+    bfree_root: str = os.path.join(data_root, "bfree")  # распакованные training_data (CSV + папки)
+    bfree_real_dir: str = "COCO_real_512"
+    # Варианты фейков SD 2.1 из B-Free: для каждого id берётся один вариант (детерминированно по id)
+    bfree_fake_variants: tuple = ("SD2.1_selfconditioned", "SD2.1_inpainted_samecat", "SD2.1_inpainted_diffcat")
+    bfree_train_max: int = 20000  # пар для обучения (из train_list.csv)
+    bfree_eval_max: int = 2000    # пар для val и для test (valid_list.csv делится по id пополам)
+
 
 @dataclass
 class AugmentationConfig:
@@ -67,6 +79,12 @@ class AugmentationConfig:
     # Фактор = 1.0 + U(sharpen_range): 0.5–1.0 → усиление резкости в 1.5–2x
     sharpen_prob: float = 0.3
     sharpen_range: tuple = (0.5, 1.0)
+
+    # Гауссов шум и cut-out — из inpainted++ (B-Free, arXiv:2412.17671); train-only, симметрично для классов
+    noise_prob: float = 0.3
+    noise_std_range: tuple = (2.0, 8.0)  # std в уровнях 0–255
+    cutout_prob: float = 0.2
+    cutout_size_range: tuple = (0.1, 0.3)  # доля стороны изображения
 
 
 @dataclass
